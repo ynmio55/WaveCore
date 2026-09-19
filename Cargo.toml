@@ -12,6 +12,7 @@ members = [
   "crates/wavecore-net",
   "crates/wavecore-js",
   "crates/wavecore-storage",
+  "crates/wavecore-sandbox",
   "crates/wavecore-cli",
 ]
 resolver = "2"

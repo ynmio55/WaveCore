@@ -6,6 +6,8 @@ pub enum DisplayCommand {
     Border { rect: Rect, widths: Edges, color: String },
     Text { text: String, rect: Rect, font_size: f32, line_height: f32, color: String },
     Image { rect: Rect, src: String },
+    PushClip(Rect),
+    PopClip,
 }
 
 pub fn build_display_list(layout: &LayoutBox) -> Vec<DisplayCommand> {
@@ -15,6 +17,11 @@ pub fn build_display_list(layout: &LayoutBox) -> Vec<DisplayCommand> {
 }
 
 fn walk(b: &LayoutBox, v: &mut Vec<DisplayCommand>) {
+    let is_clipped = b.overflow_hidden;
+    if is_clipped {
+        v.push(DisplayCommand::PushClip(b.content));
+    }
+
     if let Some(bg) = &b.background {
         v.push(DisplayCommand::FillRect { rect: b.rect, color: bg.clone() });
     }
@@ -55,5 +62,9 @@ fn walk(b: &LayoutBox, v: &mut Vec<DisplayCommand>) {
     }
     for c in &b.children {
         walk(c, v);
+    }
+
+    if is_clipped {
+        v.push(DisplayCommand::PopClip);
     }
 }

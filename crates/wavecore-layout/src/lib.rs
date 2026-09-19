@@ -14,6 +14,24 @@ impl Rect {
     pub fn contains(&self, px: f32, py: f32) -> bool {
         px >= self.x && px <= self.x + self.width && py >= self.y && py <= self.y + self.height
     }
+
+    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
+        let x1 = self.x.max(other.x);
+        let y1 = self.y.max(other.y);
+        let x2 = (self.x + self.width).min(other.x + other.width);
+        let y2 = (self.y + self.height).min(other.y + other.height);
+
+        if x2 > x1 && y2 > y1 {
+            Some(Rect {
+                x: x1,
+                y: y1,
+                width: x2 - x1,
+                height: y2 - y1,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -48,6 +66,7 @@ pub struct LayoutBox {
     pub form_id: Option<String>,
     pub form_control_type: Option<String>,
     pub placeholder: Option<String>,
+    pub overflow_hidden: bool,
     pub children: Vec<LayoutBox>,
 }
 
@@ -200,6 +219,7 @@ fn layout_at(
             form_id: None,
             form_control_type: None,
             placeholder: None,
+            overflow_hidden: false,
             children: vec![],
         };
     }
@@ -250,6 +270,7 @@ fn layout_at(
             form_id: None,
             form_control_type: None,
             placeholder: None,
+            overflow_hidden: false,
             children: vec![],
         };
     }
@@ -336,21 +357,54 @@ fn layout_at(
     if is_flex {
         let flex_dir = node.properties.get("flex-direction").map(|s| s.trim()).unwrap_or("row");
         if flex_dir == "row" {
+            let flex_wrap = node
+                .properties
+                .get("flex-wrap")
+                .map(|s| s.trim())
+                .unwrap_or("nowrap")
+                == "wrap";
             let mut cursor_x = cx;
-            let mut max_row_h: f32 = 0.0;
-            let child_nodes: Vec<&StyledNode> = node.children.iter().filter(|c| !is_hidden(c)).collect();
+            let mut cursor_y = cy;
+            let mut row_h: f32 = 0.0;
+            let child_nodes: Vec<&StyledNode> =
+                node.children.iter().filter(|c| !is_hidden(c)).collect();
             let count = child_nodes.len().max(1) as f32;
             let total_gap = (count - 1.0) * gap;
             let default_item_w = ((cw - total_gap) / count).max(40.0);
 
             for child in child_nodes {
-                let item_w = length(child.properties.get("width"), cw).unwrap_or(default_item_w);
-                let b = layout_at(child, cursor_x, cy, item_w, Some(fs), current_color.clone(), link_url.clone());
-                max_row_h = max_row_h.max(b.rect.height + b.margin.top + b.margin.bottom);
+                let grow = child
+                    .properties
+                    .get("flex-grow")
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .unwrap_or(0.0);
+                let base_w = length(child.properties.get("width"), cw).unwrap_or(default_item_w);
+                let item_w = if grow > 0.0 {
+                    (base_w + grow * 40.0).min(cw)
+                } else {
+                    base_w
+                };
+
+                if flex_wrap && (cursor_x + item_w - cx > cw) && cursor_x > cx {
+                    cursor_x = cx;
+                    cursor_y += row_h + gap;
+                    row_h = 0.0;
+                }
+
+                let b = layout_at(
+                    child,
+                    cursor_x,
+                    cursor_y,
+                    item_w,
+                    Some(fs),
+                    current_color.clone(),
+                    link_url.clone(),
+                );
+                row_h = row_h.max(b.rect.height + b.margin.top + b.margin.bottom);
                 cursor_x += b.rect.width + b.margin.left + b.margin.right + gap;
                 children.push(b);
             }
-            natural_h = max_row_h;
+            natural_h = (cursor_y + row_h - cy).max(0.0);
         } else {
             // flex-direction: column
             let mut cursor_y = cy;
@@ -434,7 +488,14 @@ fn layout_at(
     let mut final_cx = cx;
     let mut final_cy = cy;
     let position = node.properties.get("position").map(|s| s.trim()).unwrap_or("static");
-    if position == "relative" {
+    if position == "fixed" {
+        let top_off = length(node.properties.get("top"), available).unwrap_or(0.0);
+        let left_off = length(node.properties.get("left"), available).unwrap_or(0.0);
+        final_x = left_off;
+        final_cx = left_off + padding.left + border.left;
+        final_y = top_off;
+        final_cy = top_off + padding.top + border.top;
+    } else if position == "relative" {
         let top_off = length(node.properties.get("top"), available).unwrap_or(0.0);
         let left_off = length(node.properties.get("left"), available).unwrap_or(0.0);
         final_x += left_off;
@@ -442,6 +503,12 @@ fn layout_at(
         final_y += top_off;
         final_cy += top_off;
     }
+
+    let overflow_hidden = node
+        .properties
+        .get("overflow")
+        .map(|s| s.trim())
+        == Some("hidden");
 
     let rect = Rect {
         x: final_x,
@@ -525,6 +592,7 @@ fn layout_at(
         form_id,
         form_control_type,
         placeholder,
+        overflow_hidden,
         children,
     }
 }
@@ -597,5 +665,28 @@ mod tests {
         let l = layout(&style_tree(&root, &parse("div { width: 400px; }")), 800.0);
         assert!(l.children[0].is_form_control);
         assert_eq!(l.children[0].form_control_type.as_deref(), Some("input"));
+    }
+
+    #[test]
+    fn flex_wrap_and_overflow_hidden() {
+        let item1 = Node::element("div", vec![Node::text("Card 1")]);
+        let item2 = Node::element("div", vec![Node::text("Card 2")]);
+        let root = Node::element("div", vec![item1, item2]);
+        let css = "div { display: flex; flex-direction: row; flex-wrap: wrap; width: 200px; overflow: hidden; } div div { width: 150px; height: 50px; }";
+        let l = layout(&style_tree(&root, &parse(css)), 800.0);
+        assert!(l.overflow_hidden);
+        assert_eq!(l.children.len(), 2);
+        // Because item1 is 150px and container is 200px, item2 (150px) cannot fit on same line with flex-wrap: wrap
+        assert!(l.children[1].rect.y > l.children[0].rect.y);
+    }
+
+    #[test]
+    fn fixed_positioning_layout() {
+        let fixed_node = Node::element("div", vec![Node::text("Fixed Header")]);
+        let root = Node::element("div", vec![fixed_node]);
+        let css = "div div { position: fixed; top: 15px; left: 25px; width: 300px; height: 40px; }";
+        let l = layout(&style_tree(&root, &parse(css)), 800.0);
+        assert_eq!(l.children[0].rect.x, 25.0);
+        assert_eq!(l.children[0].rect.y, 15.0);
     }
 }

@@ -58,6 +58,12 @@ fn selector_specificity(selector: &str, e: &ElementData) -> Option<(u16, u16, u1
 }
 
 fn match_single_selector(s: &str, e: &ElementData) -> Option<(u16, u16, u16)> {
+    let s = s.trim();
+    if s.contains(' ') {
+        if let Some((_, last)) = s.rsplit_once(' ') {
+            return match_single_selector(last.trim(), e);
+        }
+    }
     if s == "*" {
         return Some((0, 0, 0));
     }

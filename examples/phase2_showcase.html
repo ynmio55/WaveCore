@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      background-color: #0b0f19;
+      color: #f1f5f9;
+      font-size: 16px;
+      margin: 0;
+      padding: 0;
+    }
+
+    .header-bar {
+      position: fixed;
+      top: 0px;
+      left: 0px;
+      width: 800px;
+      background-color: #0f172a;
+      border: 1px solid #1e293b;
+      padding: 14px 24px;
+    }
+
+    .brand-title {
+      color: #38bdf8;
+      font-size: 20px;
+    }
+
+    .main-container {
+      margin: 70px 24px 24px 24px;
+      width: 750px;
+    }
+
+    .hero-box {
+      background-color: #1e293b;
+      border: 2px solid #38bdf8;
+      padding: 16px 20px;
+      margin: 0 0 20px 0;
+    }
+
+    .hero-heading {
+      font-size: 22px;
+      color: #38bdf8;
+      margin: 0 0 8px 0;
+    }
+
+    .hero-desc {
+      font-size: 15px;
+      color: #94a3b8;
+      line-height: 22px;
+    }
+
+    .cards-row {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 16px;
+      width: 750px;
+    }
+
+    .card {
+      width: 230px;
+      background-color: #111827;
+      border: 1px solid #374151;
+      padding: 14px 16px;
+    }
+
+    .card-title {
+      font-size: 17px;
+      color: #10b981;
+      margin: 0 0 6px 0;
+    }
+
+    .card-body {
+      font-size: 13px;
+      color: #cbd5e1;
+      line-height: 18px;
+    }
+
+    .clip-container {
+      width: 230px;
+      height: 75px;
+      overflow: hidden;
+      background-color: #1e1e2e;
+      border: 1px solid #f43f5e;
+      padding: 12px;
+      margin: 16px 0 0 0;
+    }
+
+    .clip-badge {
+      color: #f43f5e;
+      font-size: 14px;
+      margin: 0 0 4px 0;
+    }
+
+    .clip-long-text {
+      color: #fda4af;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header-bar">
+    <div class="brand-title">🌊 WaveCore Phase 2 Architecture — Production Engine</div>
+  </div>
+
+  <div class="main-container">
+    <div class="hero-box">
+      <div class="hero-heading">สถาปัตยกรรมระดับ World-Class Browser Engine</div>
+      <div class="hero-desc">รองรับ Flexbox Wrap, Fixed Positioning, DisplayList Scissoring Clipping Stack และ Same-Origin / CSP Security Sandbox พร้อมการตัดคำและแสดงผลภาษาไทย 100% สวยงาม</div>
+    </div>
+
+    <div class="cards-row">
+      <div class="card">
+        <div class="card-title">🌐 Network Engine</div>
+        <div class="card-body">HTTP/HTTPS Client พร้อม HTTP Cache, Cookie Jar, Redirect loop guard (10 hops) และ RFC 2397 Data URI</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">⚡ Layout & Flex-Wrap</div>
+        <div class="card-body">คำนวณ Flow หลายแถวอัตโนมัติเมื่อความกว้างเต็ม พร้อม Fixed Viewport Positioning และ Box Sizing</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🛡️ Security Sandbox</div>
+        <div class="card-body">Same-Origin Policy (SOP), Content Security Policy (CSP), Permission Manager และ Render Process Isolation</div>
+      </div>
+    </div>
+
+    <div class="clip-container">
+      <div class="clip-badge">✂️ Overflow Hidden Scissoring (Clip Test)</div>
+      <div class="clip-long-text">ข้อความนี้ยาวเกินกล่องและจะถูกตัดขอบด้วย DisplayCommand::PushClip และ PopClip อย่างแม่นยำ ไม่ล้นออกนอกพื้นที่คอนเทนเนอร์เด็ดขาด</div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use fontdue::{Font, FontSettings};
 use rustybuzz::{Face, UnicodeBuffer};
+use wavecore_layout::Rect;
 use wavecore_render::DisplayCommand;
 use wavecore_text::FontSystem;
 
@@ -18,6 +19,8 @@ pub struct Surface {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<Rgba>,
+    pub clip_stack: Vec<Rect>,
+    pub damage_rects: Vec<Rect>,
     fonts: Vec<Arc<FontFace>>,
 }
 
@@ -45,12 +48,37 @@ impl Surface {
             width,
             height,
             pixels: vec![Rgba(255, 255, 255, 255); (width * height) as usize],
+            clip_stack: Vec::new(),
+            damage_rects: Vec::new(),
             fonts,
         }
     }
 
     pub fn clear(&mut self, color: Rgba) {
         self.pixels.fill(color);
+        self.clip_stack.clear();
+        self.damage_rects.clear();
+    }
+
+    pub fn active_clip(&self) -> Option<Rect> {
+        self.clip_stack.last().copied()
+    }
+
+    pub fn push_clip(&mut self, rect: Rect) {
+        let effective = if let Some(current) = self.active_clip() {
+            current.intersection(&rect).unwrap_or(Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 })
+        } else {
+            rect
+        };
+        self.clip_stack.push(effective);
+    }
+
+    pub fn pop_clip(&mut self) {
+        self.clip_stack.pop();
+    }
+
+    pub fn mark_damage(&mut self, rect: Rect) {
+        self.damage_rects.push(rect);
     }
 
     pub fn paint(&mut self, list: &[DisplayCommand]) {
@@ -60,6 +88,17 @@ impl Surface {
     pub fn paint_offset(&mut self, list: &[DisplayCommand], offset_x: f32, offset_y: f32) {
         for c in list {
             match c {
+                DisplayCommand::PushClip(rect) => {
+                    self.push_clip(Rect {
+                        x: rect.x + offset_x,
+                        y: rect.y + offset_y,
+                        width: rect.width,
+                        height: rect.height,
+                    });
+                }
+                DisplayCommand::PopClip => {
+                    self.pop_clip();
+                }
                 DisplayCommand::FillRect { rect, color } => {
                     let c = parse_color(color).unwrap_or(Rgba(240, 240, 240, 255));
                     self.fill_rect(rect.x + offset_x, rect.y + offset_y, rect.width, rect.height, c);
@@ -187,6 +226,13 @@ impl Surface {
         if alpha_mask == 0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
         }
+        if let Some(clip) = self.active_clip() {
+            let fx = x as f32;
+            let fy = y as f32;
+            if fx < clip.x || fx >= clip.x + clip.width || fy < clip.y || fy >= clip.y + clip.height {
+                return;
+            }
+        }
         let idx = (y as u32 * self.width + x as u32) as usize;
         let bg = self.pixels[idx];
         let a = (alpha_mask as u32 * color.3 as u32) / 255;
@@ -201,10 +247,25 @@ impl Surface {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        let x0 = x.max(0.0) as u32;
-        let y0 = y.max(0.0) as u32;
-        let x1 = (x + w).max(0.0).min(self.width as f32) as u32;
-        let y1 = (y + h).max(0.0).min(self.height as f32) as u32;
+        let mut rx0 = x;
+        let mut ry0 = y;
+        let mut rx1 = x + w;
+        let mut ry1 = y + h;
+
+        if let Some(clip) = self.active_clip() {
+            rx0 = rx0.max(clip.x);
+            ry0 = ry0.max(clip.y);
+            rx1 = rx1.min(clip.x + clip.width);
+            ry1 = ry1.min(clip.y + clip.height);
+            if rx1 <= rx0 || ry1 <= ry0 {
+                return;
+            }
+        }
+
+        let x0 = rx0.max(0.0) as u32;
+        let y0 = ry0.max(0.0) as u32;
+        let x1 = rx1.max(0.0).min(self.width as f32) as u32;
+        let y1 = ry1.max(0.0).min(self.height as f32) as u32;
         for py in y0..y1 {
             for px in x0..x1 {
                 self.pixels[(py * self.width + px) as usize] = color;
@@ -266,5 +327,34 @@ fn parse_color(s: &str) -> Option<Rgba> {
                 _ => None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipping_scissoring() {
+        let mut surface = Surface::new(100, 100);
+        surface.clear(Rgba(255, 255, 255, 255));
+
+        // Push clip of 10..30 x 10..30
+        let clip_rect = Rect { x: 10.0, y: 10.0, width: 20.0, height: 20.0 };
+        surface.paint(&[
+            DisplayCommand::PushClip(clip_rect),
+            DisplayCommand::FillRect {
+                rect: Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 },
+                color: "#ff0000".to_string(),
+            },
+            DisplayCommand::PopClip,
+        ]);
+
+        // (5, 5) should remain white because it is outside the clip
+        assert_eq!(surface.pixels[5 * 100 + 5], Rgba(255, 255, 255, 255));
+        // (15, 15) should be red because it is inside the clip
+        assert_eq!(surface.pixels[15 * 100 + 15], Rgba(255, 0, 0, 255));
+        // (40, 40) should remain white because it is outside the clip
+        assert_eq!(surface.pixels[40 * 100 + 40], Rgba(255, 255, 255, 255));
     }
 }

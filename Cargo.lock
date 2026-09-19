@@ -1278,6 +1278,7 @@ version = "0.1.0"
 dependencies = [
  "ureq",
  "url",
+ "wavecore-storage",
 ]
 
 [[package]]
@@ -1287,6 +1288,7 @@ dependencies = [
  "fontdue",
  "image",
  "rustybuzz",
+ "wavecore-layout",
  "wavecore-render",
  "wavecore-text",
 ]
@@ -1296,6 +1298,13 @@ name = "wavecore-render"
 version = "0.1.0"
 dependencies = [
  "wavecore-layout",
+]
+
+[[package]]
+name = "wavecore-sandbox"
+version = "0.1.0"
+dependencies = [
+ "url",
 ]
 
 [[package]]

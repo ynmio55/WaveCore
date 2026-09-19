@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 wavecore-render = { path = "../wavecore-render" }
+wavecore-layout = { path = "../wavecore-layout" }
 wavecore-text = { path = "../wavecore-text" }
 fontdue = "0.9"
 rustybuzz = "0.20"

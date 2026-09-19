@@ -312,7 +312,8 @@ fn main() {
 
         let (layout, display_list) = layout_and_render(&state.dom.borrow(), &full_css, 800.0);
 
-        let mut surface = Surface::new(800, 600);
+        let render_height = (layout.rect.height as u32 + 100).max(600).min(4000);
+        let mut surface = Surface::new(800, render_height);
         surface.clear(Rgba(13, 17, 23, 255));
         surface.paint(&display_list);
 
