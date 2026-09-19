@@ -106,10 +106,18 @@ pub fn layout(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     layout_at(root, 0.0, 0.0, viewport_width, None, None, None)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayoutCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub invalidations: u64,
+}
+
 #[derive(Default, Clone)]
 pub struct LayoutCache {
     pub cached_root: Option<LayoutBox>,
     pub last_viewport_width: Option<f32>,
+    pub stats: LayoutCacheStats,
 }
 
 impl LayoutCache {
@@ -120,14 +128,31 @@ impl LayoutCache {
     pub fn layout(&mut self, root: &StyledNode, viewport_width: f32, is_dirty: bool) -> LayoutBox {
         if !is_dirty && self.last_viewport_width == Some(viewport_width) {
             if let Some(cached) = &self.cached_root {
+                self.stats.hits = self.stats.hits.saturating_add(1);
                 return cached.clone();
             }
         }
 
+        self.stats.misses = self.stats.misses.saturating_add(1);
         let computed = layout(root, viewport_width);
         self.cached_root = Some(computed.clone());
         self.last_viewport_width = Some(viewport_width);
         computed
+    }
+
+    pub fn invalidate(&mut self) {
+        self.cached_root = None;
+        self.last_viewport_width = None;
+        self.stats.invalidations = self.stats.invalidations.saturating_add(1);
+    }
+
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.stats.hits + self.stats.misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.stats.hits as f64 / total as f64
+        }
     }
 }
 
@@ -808,4 +833,23 @@ mod tests {
         // Total box width = 400.0
         assert_eq!(vid.rect.width, 400.0);
     }
+    #[test]
+    fn layout_cache_tracks_hits_misses_and_invalidation() {
+        let root = Node::element("div", vec![Node::text("cached")]);
+        let sheet = parse("div { width: 100px; }");
+        let styled = style_tree(&root, &sheet);
+        let mut cache = LayoutCache::new();
+
+        let _ = cache.layout(&styled, 800.0, false);
+        let _ = cache.layout(&styled, 800.0, false);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.hits, 1);
+        assert!(cache.hit_rate() > 0.49);
+
+        cache.invalidate();
+        let _ = cache.layout(&styled, 800.0, false);
+        assert_eq!(cache.stats.invalidations, 1);
+        assert_eq!(cache.stats.misses, 2);
+    }
+
 }
