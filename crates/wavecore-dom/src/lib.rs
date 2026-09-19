@@ -60,6 +60,60 @@ impl ElementData {
         )
     }
 
+    pub fn is_disabled(&self) -> bool {
+        self.attributes.contains_key("disabled")
+    }
+
+    pub fn is_required(&self) -> bool {
+        self.attributes.contains_key("required")
+    }
+
+    pub fn is_checked(&self) -> bool {
+        self.attributes.contains_key("checked")
+    }
+
+    pub fn set_checked(&mut self, checked: bool) {
+        if checked {
+            self.attributes.insert("checked".to_string(), String::new());
+        } else {
+            self.attributes.remove("checked");
+        }
+    }
+
+    pub fn form_name(&self) -> Option<&str> {
+        self.attributes.get("name").map(String::as_str)
+    }
+
+    pub fn form_value(&self) -> String {
+        if self.tag_name.eq_ignore_ascii_case("textarea") {
+            self.attributes.get("value").cloned().unwrap_or_default()
+        } else {
+            self.attributes
+                .get("value")
+                .cloned()
+                .unwrap_or_else(|| "on".to_string())
+        }
+    }
+
+    pub fn participates_in_form_submission(&self) -> bool {
+        if !self.is_form_control() || self.is_disabled() || self.form_name().is_none() {
+            return false;
+        }
+        if self.tag_name.eq_ignore_ascii_case("button") {
+            return false;
+        }
+        if self.tag_name.eq_ignore_ascii_case("input") {
+            let ty = self.input_type().to_ascii_lowercase();
+            if matches!(ty.as_str(), "submit" | "button" | "reset" | "file") {
+                return false;
+            }
+            if matches!(ty.as_str(), "checkbox" | "radio") && !self.is_checked() {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn get_attribute(&self, name: &str) -> Option<&str> {
         self.attributes.get(name).map(String::as_str)
     }
@@ -385,6 +439,31 @@ impl Node {
         }
     }
 
+    pub fn collect_form_fields(&self, out: &mut Vec<(String, String)>) {
+        if let NodeType::Element(e) = &self.node_type {
+            if e.participates_in_form_submission() {
+                if let Some(name) = e.form_name() {
+                    out.push((name.to_string(), e.form_value()));
+                }
+            }
+        }
+        for child in &self.children {
+            child.collect_form_fields(out);
+        }
+    }
+
+    pub fn form_urlencoded(&self) -> String {
+        let mut fields = Vec::new();
+        self.collect_form_fields(&mut fields);
+        fields
+            .into_iter()
+            .map(|(name, value)| {
+                format!("{}={}", percent_encode_form(&name), percent_encode_form(&value))
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
     pub fn toggle_class(&mut self, class: &str) -> bool {
         if let NodeType::Element(e) = &mut self.node_type {
             let mut classes: Vec<String> = e
@@ -405,6 +484,21 @@ impl Node {
             false
         }
     }
+}
+
+
+fn percent_encode_form(input: &str) -> String {
+    let mut out = String::new();
+    for byte in input.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(*byte as char)
+            }
+            b' ' => out.push('+'),
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
     #[cfg(test)]
@@ -435,4 +529,29 @@ impl Node {
             assert_eq!(detached.node_id(), id);
             assert!(root.find_by_node_id(id).is_none());
         }
+        #[test]
+        fn serializes_successful_form_controls() {
+            let mut text_attrs = BTreeMap::new();
+            text_attrs.insert("name".into(), "q".into());
+            text_attrs.insert("value".into(), "ภาษาไทย test".into());
+
+            let mut cb_attrs = BTreeMap::new();
+            cb_attrs.insert("type".into(), "checkbox".into());
+            cb_attrs.insert("name".into(), "remember".into());
+            cb_attrs.insert("checked".into(), String::new());
+            cb_attrs.insert("value".into(), "yes".into());
+
+            let form = Node::element(
+                "form",
+                vec![
+                    Node::element_with_attributes("input", text_attrs, vec![]),
+                    Node::element_with_attributes("input", cb_attrs, vec![]),
+                ],
+            );
+
+            let encoded = form.form_urlencoded();
+            assert!(encoded.contains("q=%E0%B8%A0"));
+            assert!(encoded.contains("remember=yes"));
+        }
+
     }
