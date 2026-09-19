@@ -9,3 +9,4 @@ wavecore-css = { path = "../wavecore-css" }
 wavecore-style = { path = "../wavecore-style" }
 wavecore-layout = { path = "../wavecore-layout" }
 wavecore-render = { path = "../wavecore-render" }
+wavecore-pixels = { path = "../wavecore-pixels" }
