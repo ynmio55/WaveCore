@@ -5,3 +5,5 @@ edition.workspace = true
 
 [dependencies]
 url = "2.5"
+wavecore-layout = { path = "../wavecore-layout" }
+wavecore-render = { path = "../wavecore-render" }

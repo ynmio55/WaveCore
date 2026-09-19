@@ -7,3 +7,4 @@ edition.workspace = true
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
 url = "2.5"
 wavecore-storage = { path = "../wavecore-storage" }
+wavecore-sandbox = { path = "../wavecore-sandbox" }

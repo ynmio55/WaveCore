@@ -216,6 +216,36 @@ pub struct CachedResponse {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub etag: Option<String>,
+    pub max_age_seconds: Option<u64>,
+    pub created_at_secs: u64,
+}
+
+impl CachedResponse {
+    pub fn new(
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        etag: Option<String>,
+        max_age_seconds: Option<u64>,
+        created_at_secs: u64,
+    ) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+            etag,
+            max_age_seconds,
+            created_at_secs,
+        }
+    }
+
+    pub fn is_fresh(&self, now_secs: u64) -> bool {
+        if let Some(max_age) = self.max_age_seconds {
+            now_secs.saturating_sub(self.created_at_secs) < max_age
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]

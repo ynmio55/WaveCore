@@ -85,6 +85,76 @@ impl Surface {
         self.paint_offset(list, 0.0, 0.0);
     }
 
+    pub fn paint_damage(&mut self, list: &[DisplayCommand], damage: &[Rect]) {
+        self.paint_damage_offset(list, damage, 0.0, 0.0);
+    }
+
+    pub fn paint_damage_offset(&mut self, list: &[DisplayCommand], damage: &[Rect], offset_x: f32, offset_y: f32) {
+        if damage.is_empty() {
+            return;
+        }
+
+        for d in damage {
+            let clip_d = Rect {
+                x: d.x + offset_x,
+                y: d.y + offset_y,
+                width: d.width,
+                height: d.height,
+            };
+            self.push_clip(clip_d);
+
+            for c in list {
+                if let Some(b) = command_bounds(c) {
+                    let offset_b = Rect {
+                        x: b.x + offset_x,
+                        y: b.y + offset_y,
+                        width: b.width,
+                        height: b.height,
+                    };
+                    if clip_d.intersection(&offset_b).is_none() {
+                        continue;
+                    }
+                }
+
+                match c {
+                    DisplayCommand::PushClip(rect) => {
+                        self.push_clip(Rect {
+                            x: rect.x + offset_x,
+                            y: rect.y + offset_y,
+                            width: rect.width,
+                            height: rect.height,
+                        });
+                    }
+                    DisplayCommand::PopClip => {
+                        self.pop_clip();
+                    }
+                    DisplayCommand::FillRect { rect, color } => {
+                        let col = parse_color(color).unwrap_or(Rgba(240, 240, 240, 255));
+                        self.fill_rect(rect.x + offset_x, rect.y + offset_y, rect.width, rect.height, col);
+                    }
+                    DisplayCommand::Border { rect, widths, color } => {
+                        let col = parse_color(color).unwrap_or(Rgba(0, 0, 0, 255));
+                        let rx = rect.x + offset_x;
+                        let ry = rect.y + offset_y;
+                        self.fill_rect(rx, ry, rect.width, widths.top, col);
+                        self.fill_rect(rx, ry + rect.height - widths.bottom, rect.width, widths.bottom, col);
+                        self.fill_rect(rx, ry, widths.left, rect.height, col);
+                        self.fill_rect(rx + rect.width - widths.right, ry, widths.right, rect.height, col);
+                    }
+                    DisplayCommand::Text { text, rect, font_size, line_height, color } => {
+                        let col = parse_color(color).unwrap_or(Rgba(30, 30, 30, 255));
+                        self.draw_text(text, rect.x + offset_x, rect.y + offset_y, *font_size, *line_height, rect.width, col);
+                    }
+                    DisplayCommand::Image { rect, src } => {
+                        self.draw_image(src, rect.x + offset_x, rect.y + offset_y, rect.width, rect.height);
+                    }
+                }
+            }
+
+            self.pop_clip();
+        }
+    }
+
     pub fn paint_offset(&mut self, list: &[DisplayCommand], offset_x: f32, offset_y: f32) {
         for c in list {
             match c {
@@ -330,6 +400,16 @@ fn parse_color(s: &str) -> Option<Rgba> {
     }
 }
 
+pub fn command_bounds(cmd: &DisplayCommand) -> Option<Rect> {
+    match cmd {
+        DisplayCommand::FillRect { rect, .. } => Some(*rect),
+        DisplayCommand::Border { rect, .. } => Some(*rect),
+        DisplayCommand::Text { rect, .. } => Some(*rect),
+        DisplayCommand::Image { rect, .. } => Some(*rect),
+        DisplayCommand::PushClip(_) | DisplayCommand::PopClip => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +436,31 @@ mod tests {
         assert_eq!(surface.pixels[15 * 100 + 15], Rgba(255, 0, 0, 255));
         // (40, 40) should remain white because it is outside the clip
         assert_eq!(surface.pixels[40 * 100 + 40], Rgba(255, 255, 255, 255));
+    }
+
+    #[test]
+    fn partial_paint_damage_skips_unaffected_commands() {
+        let mut surface = Surface::new(100, 100);
+        surface.clear(Rgba(255, 255, 255, 255));
+
+        let commands = vec![
+            DisplayCommand::FillRect {
+                rect: Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+                color: "#ff0000".to_string(),
+            },
+            DisplayCommand::FillRect {
+                rect: Rect { x: 60.0, y: 60.0, width: 20.0, height: 20.0 },
+                color: "#00ff00".to_string(),
+            },
+        ];
+
+        // Damage rect only covers region (50..90 x 50..90)
+        let damage = vec![Rect { x: 50.0, y: 50.0, width: 40.0, height: 40.0 }];
+        surface.paint_damage(&commands, &damage);
+
+        // (10, 10) was NOT painted because red command does not intersect damage rect
+        assert_eq!(surface.pixels[10 * 100 + 10], Rgba(255, 255, 255, 255));
+        // (70, 70) WAS painted green because it intersects damage rect
+        assert_eq!(surface.pixels[70 * 100 + 70], Rgba(0, 255, 0, 255));
     }
 }

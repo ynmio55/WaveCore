@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use url::Url;
+use wavecore_layout::Rect;
+use wavecore_render::DisplayCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Origin {
@@ -273,6 +276,105 @@ impl RenderProcessSandbox {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum BrowserToRenderMessage {
+    Navigate { url: String, html: String },
+    InputClick { x: f32, y: f32 },
+    InputChar(char),
+    InputBackspace,
+    ResourceData { request_id: u64, result: Result<Vec<u8>, String> },
+    PermissionResult { permission: Permission, state: PermissionState },
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderToBrowserMessage {
+    FetchResource { request_id: u64, url: String, origin: Origin },
+    FrameRendered { display_list: Vec<DisplayCommand>, damage_rects: Vec<Rect>, title: Option<String> },
+    SetCookie { url: String, cookie_str: String },
+    RequestPermission { origin: Origin, permission: Permission },
+    ConsoleLog { level: String, message: String },
+}
+
+pub struct BrowserEndpoint {
+    pub sender: Sender<BrowserToRenderMessage>,
+    pub receiver: Receiver<RenderToBrowserMessage>,
+}
+
+pub struct RenderEndpoint {
+    pub sender: Sender<RenderToBrowserMessage>,
+    pub receiver: Receiver<BrowserToRenderMessage>,
+}
+
+impl BrowserEndpoint {
+    pub fn send(&self, msg: BrowserToRenderMessage) -> Result<(), String> {
+        self.sender.send(msg).map_err(|e| e.to_string())
+    }
+
+    pub fn try_recv(&self) -> Result<RenderToBrowserMessage, TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+impl RenderEndpoint {
+    pub fn send(&self, msg: RenderToBrowserMessage) -> Result<(), String> {
+        self.sender.send(msg).map_err(|e| e.to_string())
+    }
+
+    pub fn try_recv(&self) -> Result<BrowserToRenderMessage, TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+pub struct IpcChannel;
+
+impl IpcChannel {
+    pub fn create_pair() -> (BrowserEndpoint, RenderEndpoint) {
+        let (b_tx, r_rx) = mpsc::channel();
+        let (r_tx, b_rx) = mpsc::channel();
+        (
+            BrowserEndpoint { sender: b_tx, receiver: b_rx },
+            RenderEndpoint { sender: r_tx, receiver: r_rx },
+        )
+    }
+}
+
+pub struct IsolatedRenderHost {
+    pub sandbox: RenderProcessSandbox,
+    pub endpoint: RenderEndpoint,
+}
+
+impl IsolatedRenderHost {
+    pub fn new(process_id: u32, origin: Origin, endpoint: RenderEndpoint) -> Self {
+        Self {
+            sandbox: RenderProcessSandbox::new_isolated(process_id, origin),
+            endpoint,
+        }
+    }
+
+    pub fn request_resource(&self, request_id: u64, url: &str) -> Result<(), String> {
+        self.sandbox.check_file_access()?;
+        self.endpoint.send(RenderToBrowserMessage::FetchResource {
+            request_id,
+            url: url.to_string(),
+            origin: self.sandbox.origin.clone(),
+        })
+    }
+
+    pub fn dispatch_frame(
+        &self,
+        display_list: Vec<DisplayCommand>,
+        damage_rects: Vec<Rect>,
+        title: Option<String>,
+    ) -> Result<(), String> {
+        self.endpoint.send(RenderToBrowserMessage::FrameRendered {
+            display_list,
+            damage_rects,
+            title,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +431,41 @@ mod tests {
         let origin = Origin::parse("https://sandbox.test").unwrap();
         let sandbox = RenderProcessSandbox::new_isolated(42, origin);
         assert!(sandbox.check_file_access().is_err());
+    }
+
+    #[test]
+    fn ipc_channel_bidirectional_flow() {
+        let (browser, renderer) = IpcChannel::create_pair();
+
+        // Browser sends Navigate to Renderer
+        browser.send(BrowserToRenderMessage::Navigate {
+            url: "https://wavecore.dev".to_string(),
+            html: "<h1>Hello WaveCore</h1>".to_string(),
+        }).unwrap();
+
+        let recv_on_render = renderer.try_recv().unwrap();
+        match recv_on_render {
+            BrowserToRenderMessage::Navigate { url, html } => {
+                assert_eq!(url, "https://wavecore.dev");
+                assert_eq!(html, "<h1>Hello WaveCore</h1>");
+            }
+            _ => panic!("Unexpected message"),
+        }
+
+        // Renderer sends FrameRendered to Browser
+        renderer.send(RenderToBrowserMessage::FrameRendered {
+            display_list: vec![],
+            damage_rects: vec![Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 }],
+            title: Some("WaveCore Dev".to_string()),
+        }).unwrap();
+
+        let recv_on_browser = browser.try_recv().unwrap();
+        match recv_on_browser {
+            RenderToBrowserMessage::FrameRendered { damage_rects, title, .. } => {
+                assert_eq!(damage_rects.len(), 1);
+                assert_eq!(title.as_deref(), Some("WaveCore Dev"));
+            }
+            _ => panic!("Unexpected message"),
+        }
     }
 }

@@ -182,6 +182,9 @@ fn main() {
 
         let (mut layout, mut display_list) = layout_and_render(&state.dom.borrow(), &full_css, width as f32);
         let mut surface = Surface::new(width as u32, height as u32);
+        surface.clear(Rgba(13, 17, 23, 255));
+        surface.paint(&display_list);
+        let _ = win.present(&surface);
 
         while win.update() {
             let events = win.poll_events();
@@ -286,19 +289,28 @@ fn main() {
                 needs_re_render = true;
             }
 
+            let scroll_y = win.scroll_y;
+
             if needs_re_render {
                 let (nl, nd) = layout_and_render(&state.dom.borrow(), &full_css, width as f32);
                 layout = nl;
                 display_list = nd;
-            }
+                surface.clear(Rgba(13, 17, 23, 255));
+                surface.paint_offset(&display_list, 0.0, -scroll_y);
 
-            let scroll_y = win.scroll_y;
-            surface.clear(Rgba(13, 17, 23, 255));
-            surface.paint_offset(&display_list, 0.0, -scroll_y);
-
-            if let Err(e) = win.present(&surface) {
-                eprintln!("wavecore: window render error: {e}");
-                break;
+                if !surface.damage_rects.is_empty() {
+                    let rects = surface.damage_rects.clone();
+                    if let Err(e) = win.present_damage(&surface, &rects) {
+                        eprintln!("wavecore: window damage render error: {e}");
+                        break;
+                    }
+                    surface.damage_rects.clear();
+                } else if let Err(e) = win.present(&surface) {
+                    eprintln!("wavecore: window render error: {e}");
+                    break;
+                }
+            } else {
+                win.update();
             }
         }
     } else {

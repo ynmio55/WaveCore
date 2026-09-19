@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 wavecore-pixels = { path = "../wavecore-pixels" }
 wavecore-render = { path = "../wavecore-render" }
+wavecore-layout = { path = "../wavecore-layout" }
 minifb = "0.28"

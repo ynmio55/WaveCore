@@ -1,4 +1,5 @@
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
+use wavecore_layout::Rect;
 use wavecore_pixels::Surface;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +20,7 @@ pub struct BrowserWindow {
     pub width: usize,
     pub height: usize,
     pub scroll_y: f32,
+    pub back_buffer: Vec<u32>,
     mouse_was_down: bool,
 }
 
@@ -39,6 +41,7 @@ impl BrowserWindow {
             width,
             height,
             scroll_y: 0.0,
+            back_buffer: vec![0; width * height],
             mouse_was_down: false,
         })
     }
@@ -148,6 +151,7 @@ impl BrowserWindow {
         if w != self.width || h != self.height {
             self.width = w;
             self.height = h;
+            self.back_buffer = vec![0; w * h];
             Some((w, h))
         } else {
             None
@@ -156,8 +160,45 @@ impl BrowserWindow {
 
     /// Blit surface pixels to the window buffer
     pub fn present(&mut self, surface: &Surface) -> Result<(), minifb::Error> {
-        let buffer = surface.to_u32_buffer();
-        self.window.update_with_buffer(&buffer, surface.width as usize, surface.height as usize)
+        self.back_buffer = surface.to_u32_buffer();
+        self.window.update_with_buffer(&self.back_buffer, self.width, self.height)
+    }
+
+    /// Blit only the damaged regions to the window buffer
+    pub fn present_damage(&mut self, surface: &Surface, damage: &[Rect]) -> Result<(), minifb::Error> {
+        if damage.is_empty() {
+            return self.window.update_with_buffer(&self.back_buffer, self.width, self.height);
+        }
+
+        let sw = surface.width as usize;
+        let sh = surface.height as usize;
+        let bw = self.width;
+        let bh = self.height;
+
+        for d in damage {
+            let x0 = (d.x.max(0.0) as usize).min(bw);
+            let y0 = (d.y.max(0.0) as usize).min(bh);
+            let x1 = ((d.x + d.width).max(0.0) as usize).min(bw);
+            let y1 = ((d.y + d.height).max(0.0) as usize).min(bh);
+
+            for y in y0..y1 {
+                if y >= sh {
+                    break;
+                }
+                let src_row = y * sw;
+                let dst_row = y * bw;
+                for x in x0..x1 {
+                    if x >= sw {
+                        break;
+                    }
+                    let pixel = surface.pixels[src_row + x];
+                    let u = ((pixel.0 as u32) << 16) | ((pixel.1 as u32) << 8) | (pixel.2 as u32);
+                    self.back_buffer[dst_row + x] = u;
+                }
+            }
+        }
+
+        self.window.update_with_buffer(&self.back_buffer, self.width, self.height)
     }
 }
 

@@ -1278,6 +1278,7 @@ version = "0.1.0"
 dependencies = [
  "ureq",
  "url",
+ "wavecore-sandbox",
  "wavecore-storage",
 ]
 
@@ -1305,6 +1306,8 @@ name = "wavecore-sandbox"
 version = "0.1.0"
 dependencies = [
  "url",
+ "wavecore-layout",
+ "wavecore-render",
 ]
 
 [[package]]
@@ -1339,6 +1342,7 @@ name = "wavecore-window"
 version = "0.1.0"
 dependencies = [
  "minifb",
+ "wavecore-layout",
  "wavecore-pixels",
  "wavecore-render",
 ]

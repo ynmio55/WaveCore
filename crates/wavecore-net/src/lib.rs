@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use url::Url;
+use wavecore_sandbox::Origin;
 use wavecore_storage::{CachedResponse, CookieJar, HttpCache};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,12 +49,95 @@ impl HttpResponse {
 
 pub type ResourceResponse = HttpResponse;
 
+fn current_time_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheControl {
+    pub max_age: Option<u64>,
+    pub no_cache: bool,
+    pub no_store: bool,
+    pub must_revalidate: bool,
+    pub is_public: bool,
+    pub is_private: bool,
+}
+
+impl CacheControl {
+    pub fn parse(header: &str) -> Self {
+        let mut cc = Self::default();
+        for part in header.split(',') {
+            let part = part.trim();
+            if let Some((k, v)) = part.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("max-age") {
+                    cc.max_age = v.trim().parse::<u64>().ok();
+                }
+            } else if part.eq_ignore_ascii_case("no-cache") {
+                cc.no_cache = true;
+            } else if part.eq_ignore_ascii_case("no-store") {
+                cc.no_store = true;
+            } else if part.eq_ignore_ascii_case("must-revalidate") {
+                cc.must_revalidate = true;
+            } else if part.eq_ignore_ascii_case("public") {
+                cc.is_public = true;
+            } else if part.eq_ignore_ascii_case("private") {
+                cc.is_private = true;
+            }
+        }
+        cc
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorsPolicy;
+
+impl CorsPolicy {
+    pub fn check(
+        request_origin: Option<&Origin>,
+        target_origin: &Origin,
+        response_headers: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let Some(req_origin) = request_origin else {
+            return Ok(());
+        };
+        if req_origin.is_same_origin(target_origin) {
+            return Ok(());
+        }
+
+        let allow_origin = response_headers
+            .get("access-control-allow-origin")
+            .map(|s| s.trim());
+
+        match allow_origin {
+            Some("*") => Ok(()),
+            Some(allowed) => {
+                let req_str = req_origin.to_string_repr();
+                if allowed.eq_ignore_ascii_case(&req_str) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "CORS error: Access-Control-Allow-Origin '{allowed}' does not match request origin '{req_str}'"
+                    ))
+                }
+            }
+            None => Err(format!(
+                "CORS error: Missing Access-Control-Allow-Origin header for cross-origin request from {:?}",
+                req_origin
+            )),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum NetError {
     Network(String),
     Io(std::io::Error),
     InvalidUrl(String),
     TooManyRedirects(usize),
+    Cors(String),
 }
 
 impl std::fmt::Display for NetError {
@@ -63,6 +147,7 @@ impl std::fmt::Display for NetError {
             NetError::Io(e) => write!(f, "IO error: {e}"),
             NetError::InvalidUrl(s) => write!(f, "Invalid URL: {s}"),
             NetError::TooManyRedirects(n) => write!(f, "Exceeded maximum redirect limit ({n})"),
+            NetError::Cors(s) => write!(f, "{s}"),
         }
     }
 }
@@ -93,6 +178,14 @@ impl NetworkClient {
     }
 
     pub fn fetch(&mut self, url_or_path: &str) -> Result<HttpResponse, NetError> {
+        self.fetch_with_origin(url_or_path, None)
+    }
+
+    pub fn fetch_with_origin(
+        &mut self,
+        url_or_path: &str,
+        caller_origin: Option<&Origin>,
+    ) -> Result<HttpResponse, NetError> {
         let trimmed = url_or_path.trim();
 
         // 1. Data URIs (RFC 2397)
@@ -145,7 +238,7 @@ impl NetworkClient {
             ));
         }
 
-        // 3. HTTP / HTTPS with Redirects, Cache, and Cookies
+        // 3. HTTP / HTTPS with Redirects, Cache, Cookies, and CORS
         let mut current_url = trimmed.to_string();
         let mut redirect_count = 0;
 
@@ -154,12 +247,44 @@ impl NetworkClient {
                 return Err(NetError::TooManyRedirects(self.max_redirects));
             }
 
-            // Check Cache
+            let now = current_time_secs();
+
+            // Check fresh cache before network
+            if let Some(cached) = self.cache.get(&current_url) {
+                if cached.is_fresh(now) {
+                    let mut headers_map = HashMap::new();
+                    for (k, v) in &cached.headers {
+                        headers_map.insert(k.clone(), v.clone());
+                    }
+                    if let Ok(target_origin) = Origin::parse(&current_url) {
+                        CorsPolicy::check(caller_origin, &target_origin, &headers_map)
+                            .map_err(NetError::Cors)?;
+                    }
+                    let content_type = headers_map
+                        .get("content-type")
+                        .cloned()
+                        .unwrap_or_else(|| "text/html".to_string());
+                    return Ok(HttpResponse::new(
+                        current_url,
+                        cached.status,
+                        "OK (Fresh Cache)".to_string(),
+                        headers_map,
+                        cached.body.clone(),
+                        content_type,
+                    ));
+                }
+            }
+
             let cached_etag = self.cache.get(&current_url).and_then(|c| c.etag.clone());
 
             let mut req = ureq::get(&current_url)
                 .set("User-Agent", &self.user_agent)
                 .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8");
+
+            // Attach Caller Origin for CORS
+            if let Some(req_origin) = caller_origin {
+                req = req.set("Origin", &req_origin.to_string_repr());
+            }
 
             // Attach Cookies
             if let Some(cookie_str) = self.cookie_jar.cookie_header_for_url(&current_url) {
@@ -179,6 +304,10 @@ impl NetworkClient {
                         let mut headers_map = HashMap::new();
                         for (k, v) in &cached.headers {
                             headers_map.insert(k.clone(), v.clone());
+                        }
+                        if let Ok(target_origin) = Origin::parse(&current_url) {
+                            CorsPolicy::check(caller_origin, &target_origin, &headers_map)
+                                .map_err(NetError::Cors)?;
                         }
                         let content_type = headers_map
                             .get("content-type")
@@ -230,6 +359,12 @@ impl NetworkClient {
                 }
             }
 
+            // Validate CORS policy for cross-origin request
+            if let Ok(target_origin) = Origin::parse(&current_url) {
+                CorsPolicy::check(caller_origin, &target_origin, &headers_map)
+                    .map_err(NetError::Cors)?;
+            }
+
             // Handle 301, 302, 307, 308 redirects
             if (300..=399).contains(&status_code) {
                 if let Some(loc) = headers_map.get("location") {
@@ -251,18 +386,28 @@ impl NetworkClient {
             let mut body_bytes = Vec::new();
             reader.read_to_end(&mut body_bytes).map_err(NetError::Io)?;
 
-            // Store in Cache if ETag present
-            let etag = headers_map.get("etag").cloned();
-            let header_list: Vec<(String, String)> = headers_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            self.cache.put(
-                &current_url,
-                CachedResponse {
-                    status: status_code,
-                    headers: header_list,
-                    body: body_bytes.clone(),
-                    etag,
-                },
-            );
+            // Parse Cache-Control
+            let cc = headers_map
+                .get("cache-control")
+                .map(|s| CacheControl::parse(s))
+                .unwrap_or_default();
+
+            // Store in Cache if not no-store
+            if !cc.no_store {
+                let etag = headers_map.get("etag").cloned();
+                let header_list: Vec<(String, String)> = headers_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                self.cache.put(
+                    &current_url,
+                    CachedResponse::new(
+                        status_code,
+                        header_list,
+                        body_bytes.clone(),
+                        etag,
+                        cc.max_age,
+                        now,
+                    ),
+                );
+            }
 
             return Ok(HttpResponse::new(
                 current_url,
@@ -276,10 +421,18 @@ impl NetworkClient {
     }
 }
 
-// Global convenience function
+// Global convenience functions
 pub fn fetch_resource(url_or_path: &str) -> Result<HttpResponse, NetError> {
     let mut client = NetworkClient::new();
     client.fetch(url_or_path)
+}
+
+pub fn fetch_resource_with_origin(
+    url_or_path: &str,
+    caller_origin: Option<&Origin>,
+) -> Result<HttpResponse, NetError> {
+    let mut client = NetworkClient::new();
+    client.fetch_with_origin(url_or_path, caller_origin)
 }
 
 #[derive(Debug, Clone)]
@@ -417,5 +570,40 @@ mod tests {
         assert_eq!(res.status_text, "OK");
         assert_eq!(res.content_type, "text/html");
         assert_eq!(res.text(), "<h1>WaveCore Production</h1>");
+    }
+
+    #[test]
+    fn cache_control_parsing_and_freshness() {
+        let cc = CacheControl::parse("public, max-age=3600, must-revalidate");
+        assert_eq!(cc.max_age, Some(3600));
+        assert!(cc.is_public);
+        assert!(cc.must_revalidate);
+        assert!(!cc.no_store);
+
+        let cached = CachedResponse::new(200, vec![], vec![1, 2, 3], None, Some(60), 1000);
+        assert!(cached.is_fresh(1030));
+        assert!(!cached.is_fresh(1070));
+    }
+
+    #[test]
+    fn cors_policy_evaluation() {
+        let origin_a = Origin::parse("https://app.example.com").unwrap();
+        let origin_b = Origin::parse("https://api.external.com").unwrap();
+
+        let mut headers = HashMap::new();
+        // Missing Access-Control-Allow-Origin
+        assert!(CorsPolicy::check(Some(&origin_a), &origin_b, &headers).is_err());
+
+        // Wildcard allowed
+        headers.insert("access-control-allow-origin".to_string(), "*".to_string());
+        assert!(CorsPolicy::check(Some(&origin_a), &origin_b, &headers).is_ok());
+
+        // Matching specific origin
+        headers.insert("access-control-allow-origin".to_string(), "https://app.example.com".to_string());
+        assert!(CorsPolicy::check(Some(&origin_a), &origin_b, &headers).is_ok());
+
+        // Mismatched origin
+        headers.insert("access-control-allow-origin".to_string(), "https://other.com".to_string());
+        assert!(CorsPolicy::check(Some(&origin_a), &origin_b, &headers).is_err());
     }
 }

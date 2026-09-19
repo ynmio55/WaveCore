@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      background-color: #030712;
+      color: #f9fafb;
+      font-size: 16px;
+      margin: 0;
+      padding: 0;
+    }
+
+    .top-header {
+      position: fixed;
+      top: 0px;
+      left: 0px;
+      width: 800px;
+      background-color: #111827;
+      border: 1px solid #1f2937;
+      padding: 14px 24px;
+    }
+
+    .logo {
+      color: #60a5fa;
+      font-size: 21px;
+    }
+
+    .content-area {
+      margin: 72px 24px 24px 24px;
+      width: 750px;
+    }
+
+    .hero-panel {
+      background-color: #1f2937;
+      border: 2px solid #3b82f6;
+      padding: 18px 22px;
+      margin: 0 0 20px 0;
+    }
+
+    .hero-title {
+      font-size: 22px;
+      color: #60a5fa;
+      margin: 0 0 8px 0;
+    }
+
+    .hero-desc {
+      font-size: 15px;
+      color: #9ca3af;
+      line-height: 22px;
+    }
+
+    .pillars-grid {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 16px;
+      width: 750px;
+    }
+
+    .pillar-card {
+      width: 230px;
+      background-color: #111827;
+      border: 1px solid #374151;
+      padding: 16px;
+    }
+
+    .pillar-heading {
+      font-size: 16px;
+      color: #34d399;
+      margin: 0 0 8px 0;
+    }
+
+    .pillar-text {
+      font-size: 13px;
+      color: #d1d5db;
+      line-height: 18px;
+    }
+
+    .perf-box {
+      width: 230px;
+      height: 80px;
+      overflow: hidden;
+      background-color: #18181b;
+      border: 1px solid #a855f7;
+      padding: 12px;
+      margin: 16px 0 0 0;
+    }
+
+    .perf-badge {
+      color: #c084fc;
+      font-size: 14px;
+      margin: 0 0 4px 0;
+    }
+
+    .perf-detail {
+      color: #e9d5ff;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="top-header">
+    <div class="logo">⚡ WaveCore Phase 3 Architecture — Multi-Process & Partial Repaint</div>
+  </div>
+
+  <div class="content-area">
+    <div class="hero-panel">
+      <div class="hero-title">ก้าวสำคัญสู่ Browser Engine ระดับโปรดักชัน</div>
+      <div class="hero-desc">แยก Browser Process และ Render Process ผ่าน IPC Message พร้อมระบบ CORS Preflight, Cache-Control Semantics (max-age/no-store) และ Partial Repaint ด้วย Damage Rectangles เพื่อประสิทธิภาพ 60/120Hz ที่แท้จริง</div>
+    </div>
+
+    <div class="pillars-grid">
+      <div class="pillar-card">
+        <div class="pillar-heading">📡 Multi-Process IPC</div>
+        <div class="pillar-text">จำลอง IsolatedRenderHost และแชนเนลสองทาง BrowserEndpoint ↔ RenderEndpoint แยก IO / Filesystem ไม่ให้แตะต้องโดยตรง</div>
+      </div>
+
+      <div class="pillar-card">
+        <div class="pillar-heading">🔒 CORS & Cache-Control</div>
+        <div class="pillar-text">ตรวจจับ Access-Control-Allow-Origin ข้าม Origin และประมวลผล max-age / no-store / 304 revalidation ใน HttpCache</div>
+      </div>
+
+      <div class="pillar-card">
+        <div class="pillar-heading">⚡ Damage Pipeline</div>
+        <div class="pillar-text">กรองคำสั่งวาดเฉพาะพื้นที่ที่เกิดการเปลี่ยนแปลง (paint_damage) และส่งขึ้นหน้าต่างผ่าน present_damage โดยไม่ล้างจอใหม่ทั้งหมด</div>
+      </div>
+    </div>
+
+    <div class="perf-box">
+      <div class="perf-badge">🚀 Zero Idle Redraw (Compositor Ready)</div>
+      <div class="perf-detail">ระบบตรวจจับความเปลี่ยนแปลงเฉพาะเมื่อมี Event หรือ Damage Rects ทำให้ลดการกิน CPU และ Memory Bandwidth ได้อย่างมหาศาล</div>
+    </div>
+  </div>
+</body>
+</html>
