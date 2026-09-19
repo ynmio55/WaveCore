@@ -8,3 +8,4 @@ description = "Pulse JavaScript Engine and DOM Bindings for WaveCore"
 [dependencies]
 wavecore-dom = { path = "../wavecore-dom" }
 wavecore-net = { path = "../wavecore-net" }
+wavecore-sandbox = { path = "../wavecore-sandbox" }
