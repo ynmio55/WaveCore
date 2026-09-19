@@ -4,6 +4,7 @@ members = [
   "crates/wavecore-html",
   "crates/wavecore-css",
   "crates/wavecore-style",
+  "crates/wavecore-text",
   "crates/wavecore-layout",
   "crates/wavecore-render",
   "crates/wavecore-pixels",
