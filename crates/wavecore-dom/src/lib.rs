@@ -1,4 +1,14 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(pub u64);
+
+fn next_node_id() -> NodeId {
+    NodeId(NEXT_NODE_ID.fetch_add(1, Ordering::Relaxed))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeType {
@@ -61,6 +71,7 @@ impl ElementData {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
+    pub id: NodeId,
     pub node_type: NodeType,
     pub children: Vec<Node>,
 }
@@ -68,6 +79,7 @@ pub struct Node {
 impl Node {
     pub fn document(children: Vec<Node>) -> Self {
         Self {
+            id: next_node_id(),
             node_type: NodeType::Document,
             children,
         }
@@ -75,6 +87,7 @@ impl Node {
 
     pub fn text(value: impl Into<String>) -> Self {
         Self {
+            id: next_node_id(),
             node_type: NodeType::Text(value.into()),
             children: vec![],
         }
@@ -90,12 +103,131 @@ impl Node {
         children: Vec<Node>,
     ) -> Self {
         Self {
+            id: next_node_id(),
             node_type: NodeType::Element(ElementData {
                 tag_name: tag_name.into(),
                 attributes,
             }),
             children,
         }
+    }
+
+
+    pub fn node_id(&self) -> NodeId {
+        self.id
+    }
+
+    pub fn find_by_node_id(&self, id: NodeId) -> Option<&Node> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in &self.children {
+            if let Some(found) = child.find_by_node_id(id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    pub fn find_by_node_id_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in &mut self.children {
+            if let Some(found) = child.find_by_node_id_mut(id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    pub fn query_selector_all<'a>(&'a self, selector: &str, out: &mut Vec<&'a Node>) {
+        let s = selector.trim();
+        let matches = match &self.node_type {
+            NodeType::Element(e) => {
+                if let Some(id) = s.strip_prefix('#') {
+                    e.id() == Some(id)
+                } else if let Some(class) = s.strip_prefix('.') {
+                    e.has_class(class)
+                } else {
+                    e.tag_name.eq_ignore_ascii_case(s)
+                }
+            }
+            _ => false,
+        };
+        if matches {
+            out.push(self);
+        }
+        for child in &self.children {
+            child.query_selector_all(s, out);
+        }
+    }
+
+    pub fn ancestor_ids_for(&self, target: NodeId) -> Option<Vec<NodeId>> {
+        if self.id == target {
+            return Some(vec![self.id]);
+        }
+        for child in &self.children {
+            if let Some(mut path) = child.ancestor_ids_for(target) {
+                let mut result = Vec::with_capacity(path.len() + 1);
+                result.push(self.id);
+                result.append(&mut path);
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    pub fn detach_by_id(&mut self, target: NodeId) -> Option<Node> {
+        if let Some(pos) = self.children.iter().position(|child| child.id == target) {
+            return Some(self.children.remove(pos));
+        }
+        for child in &mut self.children {
+            if let Some(found) = child.detach_by_id(target) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    pub fn parent_of(&self, target: NodeId) -> Option<&Node> {
+        if self.children.iter().any(|child| child.id == target) {
+            return Some(self);
+        }
+        for child in &self.children {
+            if let Some(parent) = child.parent_of(target) {
+                return Some(parent);
+            }
+        }
+        None
+    }
+
+    pub fn previous_sibling_of(&self, target: NodeId) -> Option<&Node> {
+        for pair in self.children.windows(2) {
+            if pair[1].id == target {
+                return Some(&pair[0]);
+            }
+        }
+        for child in &self.children {
+            if let Some(found) = child.previous_sibling_of(target) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    pub fn next_sibling_of(&self, target: NodeId) -> Option<&Node> {
+        for pair in self.children.windows(2) {
+            if pair[0].id == target {
+                return Some(&pair[1]);
+            }
+        }
+        for child in &self.children {
+            if let Some(found) = child.next_sibling_of(target) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     pub fn find_by_id(&self, id: &str) -> Option<&Node> {
@@ -268,3 +400,33 @@ impl Node {
         }
     }
 }
+
+    #[cfg(test)]
+    mod identity_tests {
+        use super::*;
+
+        #[test]
+        fn stable_node_identity_and_relationships() {
+            let first = Node::element("span", vec![]);
+            let first_id = first.node_id();
+            let second = Node::element("span", vec![]);
+            let second_id = second.node_id();
+            let parent = Node::element("div", vec![first, second]);
+            let root = Node::document(vec![parent]);
+
+            assert_eq!(root.find_by_node_id(first_id).unwrap().tag_name(), Some("span"));
+            assert_eq!(root.parent_of(first_id).unwrap().tag_name(), Some("div"));
+            assert_eq!(root.next_sibling_of(first_id).unwrap().node_id(), second_id);
+            assert_eq!(root.previous_sibling_of(second_id).unwrap().node_id(), first_id);
+        }
+
+        #[test]
+        fn detach_moves_node_without_changing_identity() {
+            let child = Node::element("p", vec![]);
+            let id = child.node_id();
+            let mut root = Node::document(vec![Node::element("div", vec![child])]);
+            let detached = root.detach_by_id(id).unwrap();
+            assert_eq!(detached.node_id(), id);
+            assert!(root.find_by_node_id(id).is_none());
+        }
+    }
