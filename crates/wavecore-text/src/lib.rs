@@ -108,9 +108,25 @@ impl FontSystem {
 impl Default for FontSystem{fn default()->Self{Self::new()}}
 
 fn estimated_width(g:&str,style:&TextStyle)->f32{UnicodeWidthStr::width(g).max(1)as f32*style.font_size*0.55+style.letter_spacing}
+
+thread_local! {
+    static MEASURE_FONT_SYSTEM: std::cell::RefCell<FontSystem> =
+        std::cell::RefCell::new(FontSystem::new());
+}
+
+fn shaped_grapheme_width(g: &str, style: &TextStyle) -> f32 {
+    MEASURE_FONT_SYSTEM.with(|fs| {
+        fs.borrow()
+            .shape(g, style)
+            .map(|glyphs| glyphs.iter().map(|glyph| glyph.x_advance).sum::<f32>())
+            .filter(|width| width.is_finite() && *width > 0.0)
+            .unwrap_or_else(|| estimated_width(g, style))
+    })
+}
+
 pub fn measure_and_wrap(text:&str,max_width:f32,style:&TextStyle)->TextMetrics{
  let line_height=(style.font_size*style.line_height).max(style.font_size);let mut lines=vec![];let mut current=String::new();let mut width=0.0;
- for g in UnicodeSegmentation::graphemes(text,true){if g=="\n"{lines.push(TextLine{text:std::mem::take(&mut current),width});width=0.0;continue}let gw=estimated_width(g,style);if max_width>0.0&&width+gw>max_width&&!current.is_empty(){lines.push(TextLine{text:std::mem::take(&mut current),width});width=0.0}current.push_str(g);width+=gw}
+ for g in UnicodeSegmentation::graphemes(text,true){if g=="\n"{lines.push(TextLine{text:std::mem::take(&mut current),width});width=0.0;continue}let gw=shaped_grapheme_width(g,style);if max_width>0.0&&width+gw>max_width&&!current.is_empty(){lines.push(TextLine{text:std::mem::take(&mut current),width});width=0.0}current.push_str(g);width+=gw}
  if !current.is_empty()||lines.is_empty(){lines.push(TextLine{text:current,width})}let widest=lines.iter().map(|l|l.width).fold(0.0,f32::max);TextMetrics{height:line_height*lines.len()as f32,width:widest,lines,line_height}
 }
 pub fn grapheme_count(text:&str)->usize{UnicodeSegmentation::graphemes(text,true).count()}
