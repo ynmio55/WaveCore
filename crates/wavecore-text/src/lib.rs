@@ -1,4 +1,4 @@
-use fontdb::{Database,Family,Query,Source};
+use fontdb::{Database,Family,Query};
 use rustybuzz::{Face,UnicodeBuffer};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
