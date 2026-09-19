@@ -195,6 +195,19 @@ impl Node {
         None
     }
 
+    pub fn ensure_element_id(&mut self, id: NodeId, prefix: &str) -> Option<String> {
+        let node = self.find_by_node_id_mut(id)?;
+        let NodeType::Element(element) = &mut node.node_type else {
+            return None;
+        };
+        if let Some(existing) = element.id() {
+            return Some(existing.to_string());
+        }
+        let generated = format!("{prefix}{}", id.0);
+        element.set_attribute("id", &generated);
+        Some(generated)
+    }
+
     pub fn query_selector_all_ids(&self, selector: &str) -> Vec<NodeId> {
         let mut nodes = Vec::new();
         self.query_selector_all(selector, &mut nodes);
