@@ -19,12 +19,25 @@ pub enum TokenKind {
     False,
     Null,
     Undefined,
+    Try,
+    Catch,
+    Finally,
+    Throw,
+    New,
+    TypeOf,
+    InstanceOf,
+    This,
+    In,
 
     // Operators
     Plus,
+    PlusEqual,
     Minus,
+    MinusEqual,
     Star,
+    StarEqual,
     Slash,
+    SlashEqual,
     Percent,
     Equal,
     EqualEqual,
@@ -103,10 +116,34 @@ impl<'a> Lexer<'a> {
                 ';' => TokenKind::Semicolon,
                 ':' => TokenKind::Colon,
                 '.' => TokenKind::Dot,
-                '+' => TokenKind::Plus,
-                '-' => TokenKind::Minus,
-                '*' => TokenKind::Star,
-                '/' => TokenKind::Slash,
+                '+' => {
+                    if self.match_char('=') {
+                        TokenKind::PlusEqual
+                    } else {
+                        TokenKind::Plus
+                    }
+                }
+                '-' => {
+                    if self.match_char('=') {
+                        TokenKind::MinusEqual
+                    } else {
+                        TokenKind::Minus
+                    }
+                }
+                '*' => {
+                    if self.match_char('=') {
+                        TokenKind::StarEqual
+                    } else {
+                        TokenKind::Star
+                    }
+                }
+                '/' => {
+                    if self.match_char('=') {
+                        TokenKind::SlashEqual
+                    } else {
+                        TokenKind::Slash
+                    }
+                }
                 '%' => TokenKind::Percent,
                 '!' => {
                     if self.match_char('=') {
@@ -286,6 +323,15 @@ impl<'a> Lexer<'a> {
             "false" => TokenKind::False,
             "null" => TokenKind::Null,
             "undefined" => TokenKind::Undefined,
+            "try" => TokenKind::Try,
+            "catch" => TokenKind::Catch,
+            "finally" => TokenKind::Finally,
+            "throw" => TokenKind::Throw,
+            "new" => TokenKind::New,
+            "typeof" => TokenKind::TypeOf,
+            "instanceof" => TokenKind::InstanceOf,
+            "this" => TokenKind::This,
+            "in" => TokenKind::In,
             _ => TokenKind::Identifier(s),
         }
     }

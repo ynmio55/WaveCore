@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WaveCore Production JS & Web APIs Showcase</title>
+    <style>
+        body {
+            background-color: #0b0f19;
+            color: #f1f5f9;
+            font-family: sans-serif;
+            margin: 0;
+            padding: 24px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #1e293b;
+            padding: 16px 24px;
+            border-radius: 12px;
+            border: 1px solid #334155;
+            margin-bottom: 24px;
+        }
+        .title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #38bdf8;
+        }
+        .status-badge {
+            background-color: #059669;
+            color: #ffffff;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+        .card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .card h3 {
+            margin-top: 0;
+            color: #60a5fa;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 8px;
+        }
+        .console-box {
+            background-color: #030712;
+            color: #4ade80;
+            font-family: monospace;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #1f2937;
+            min-height: 48px;
+            margin-top: 12px;
+        }
+        .tag-list {
+            color: #94a3b8;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">⚡ WaveCore Pulse VM — Production Deepening</div>
+        <div id="badge" class="status-badge">Phase 1: Active</div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h3>1. Lexical Closures & Scope Chain</h3>
+            <p>ทดสอบการเก็บ State ของตัวแปรผ่าน Closure อย่างสมบูรณ์แบบ:</p>
+            <div id="closure-output" class="console-box">Initializing closure...</div>
+        </div>
+
+        <div class="card">
+            <h3>2. Modern Array Methods & Indexing</h3>
+            <p>Array mapping, indexing, และ formatting:</p>
+            <div id="array-output" class="console-box">Calculating arrays...</div>
+            <div id="array-tags" class="tag-list">Tags: none</div>
+        </div>
+
+        <div class="card">
+            <h3>3. Exception Handling (try / catch / finally)</h3>
+            <p>ทดสอบการ Throw ข้อผิดพลาดและกู้คืน State:</p>
+            <div id="try-output" class="console-box">Testing exceptions...</div>
+        </div>
+
+        <div class="card">
+            <h3>4. Web APIs (window.location & URL)</h3>
+            <p>ตรวจสอบ URL Navigation & Environment:</p>
+            <div id="webapi-output" class="console-box">Loading Web APIs...</div>
+        </div>
+    </div>
+
+    <div id="dynamic-container" class="card">
+        <h3>5. Dynamic DOM Generation (createElement & appendChild)</h3>
+        <p>สร้างโหนด DOM และคลาสแบบ Real-time:</p>
+    </div>
+
+    <script>
+        // 1. Lexical Closure Test
+        function createCounter(name, initial) {
+            let count = initial;
+            return function(step) {
+                count = count + step;
+                return name + ": count=" + count;
+            };
+        }
+        let counterA = createCounter("Worker-Alpha", 100);
+        let resA1 = counterA(5);
+        let resA2 = counterA(15);
+        document.getElementById("closure-output").setInnerText(resA2 + " (Closure State Preserved)");
+
+        // 2. Arrays & Higher Order Methods
+        let rawScores = [80, 92, 75, 88, 95];
+        let bonus = rawScores.map(function(s) {
+            return s + 5;
+        });
+        let joined = bonus.join(" | ");
+        document.getElementById("array-output").setInnerText("Bonus Scores: " + joined);
+        document.getElementById("array-tags").setInnerText("Total items: " + bonus.length + ", Highest: " + bonus[4]);
+
+        // 3. Exception Handling
+        let excStatus = "Normal";
+        try {
+            throw "Simulated Network Timeout (Code 408)";
+        } catch (err) {
+            excStatus = "Recovered: " + err;
+        } finally {
+            excStatus = excStatus + " [Finally Executed]";
+        }
+        document.getElementById("try-output").setInnerText(excStatus);
+
+        // 4. Web APIs
+        let currentLoc = window.location.href;
+        let u = new URL("https://wavecore.dev/engine/pulse?ver=1.0#spec");
+        document.getElementById("webapi-output").setInnerText("Host: " + u.host + " | Path: " + u.pathname + " | Status: OK");
+
+        // 5. DOM createElement & appendChild
+        let container = document.getElementById("dynamic-container");
+        let newElem = document.createElement("p");
+        newElem.setInnerText("🚀 โหนดนี้ถูกสร้างผ่าน document.createElement และ appendChild สำเร็จเรียบร้อย!");
+        container.appendChild(newElem);
+    </script>
+</body>
+</html>

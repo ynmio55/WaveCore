@@ -186,4 +186,85 @@ impl Node {
     pub fn set_inner_text(&mut self, text: &str) {
         self.children = vec![Node::text(text)];
     }
+
+    pub fn append_child(&mut self, child: Node) {
+        self.children.push(child);
+    }
+
+    pub fn remove_child_at(&mut self, index: usize) -> Option<Node> {
+        if index < self.children.len() {
+            Some(self.children.remove(index))
+        } else {
+            None
+        }
+    }
+
+    pub fn tag_name(&self) -> Option<&str> {
+        if let NodeType::Element(e) = &self.node_type {
+            Some(&e.tag_name)
+        } else {
+            None
+        }
+    }
+
+    pub fn class_name(&self) -> Option<&str> {
+        if let NodeType::Element(e) = &self.node_type {
+            e.attributes.get("class").map(String::as_str)
+        } else {
+            None
+        }
+    }
+
+    pub fn set_class_name(&mut self, class_name: &str) {
+        if let NodeType::Element(e) = &mut self.node_type {
+            e.set_attribute("class", class_name);
+        }
+    }
+
+    pub fn add_class(&mut self, class: &str) {
+        if let NodeType::Element(e) = &mut self.node_type {
+            let mut classes: Vec<String> = e
+                .attributes
+                .get("class")
+                .map(|s| s.split_whitespace().map(String::from).collect())
+                .unwrap_or_default();
+            if !classes.iter().any(|c| c == class) {
+                classes.push(class.to_string());
+                e.set_attribute("class", classes.join(" "));
+            }
+        }
+    }
+
+    pub fn remove_class(&mut self, class: &str) {
+        if let NodeType::Element(e) = &mut self.node_type {
+            if let Some(existing) = e.attributes.get("class") {
+                let classes: Vec<&str> = existing
+                    .split_whitespace()
+                    .filter(|c| *c != class)
+                    .collect();
+                e.set_attribute("class", classes.join(" "));
+            }
+        }
+    }
+
+    pub fn toggle_class(&mut self, class: &str) -> bool {
+        if let NodeType::Element(e) = &mut self.node_type {
+            let mut classes: Vec<String> = e
+                .attributes
+                .get("class")
+                .map(|s| s.split_whitespace().map(String::from).collect())
+                .unwrap_or_default();
+            if let Some(pos) = classes.iter().position(|c| c == class) {
+                classes.remove(pos);
+                e.set_attribute("class", classes.join(" "));
+                false
+            } else {
+                classes.push(class.to_string());
+                e.set_attribute("class", classes.join(" "));
+                true
+            }
+        } else {
+            false
+        }
+    }
 }

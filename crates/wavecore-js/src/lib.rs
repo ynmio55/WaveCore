@@ -20,6 +20,11 @@ pub fn eval_script(script: &str, vm: &mut VM) -> Result<JsValue, String> {
     vm.execute(chunks)
 }
 
+pub fn execute_script(script: &str) -> Result<JsValue, String> {
+    let mut vm = VM::new();
+    eval_script(script, &mut vm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,7 +20,10 @@ impl Parser {
     }
 
     fn declaration(&mut self) -> Result<Stmt, String> {
-        if self.match_token(&TokenKind::Let) || self.match_token(&TokenKind::Const) || self.match_token(&TokenKind::Var) {
+        if self.match_token(&TokenKind::Let)
+            || self.match_token(&TokenKind::Const)
+            || self.match_token(&TokenKind::Var)
+        {
             self.var_declaration()
         } else if self.match_token(&TokenKind::Function) {
             self.function_declaration()
@@ -57,7 +60,12 @@ impl Parser {
             loop {
                 match self.advance().kind {
                     TokenKind::Identifier(p) => params.push(p),
-                    _ => return Err(format!("Expected parameter name at line {}", self.previous().line)),
+                    _ => {
+                        return Err(format!(
+                            "Expected parameter name at line {}",
+                            self.previous().line
+                        ))
+                    }
                 }
                 if !self.match_token(&TokenKind::Comma) {
                     break;
@@ -80,11 +88,63 @@ impl Parser {
             self.for_statement()
         } else if self.match_token(&TokenKind::Return) {
             self.return_statement()
+        } else if self.match_token(&TokenKind::Try) {
+            self.try_statement()
+        } else if self.match_token(&TokenKind::Throw) {
+            self.throw_statement()
         } else if self.match_token(&TokenKind::LeftBrace) {
             Ok(Stmt::Block(self.block_statement()?))
         } else {
             self.expression_statement()
         }
+    }
+
+    fn try_statement(&mut self) -> Result<Stmt, String> {
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after 'try'")?;
+        let try_block = Box::new(Stmt::Block(self.block_statement()?));
+
+        let mut catch_param = None;
+        let mut catch_block = None;
+        if self.match_token(&TokenKind::Catch) {
+            if self.match_token(&TokenKind::LeftParen) {
+                let param = match self.advance().kind {
+                    TokenKind::Identifier(p) => p,
+                    _ => {
+                        return Err(format!(
+                            "Expected catch parameter name at line {}",
+                            self.previous().line
+                        ))
+                    }
+                };
+                self.consume(&TokenKind::RightParen, "Expected ')' after catch parameter")?;
+                catch_param = Some(param);
+            }
+            self.consume(&TokenKind::LeftBrace, "Expected '{' before catch block")?;
+            catch_block = Some(Box::new(Stmt::Block(self.block_statement()?)));
+        }
+
+        let mut finally_block = None;
+        if self.match_token(&TokenKind::Finally) {
+            self.consume(&TokenKind::LeftBrace, "Expected '{' before finally block")?;
+            finally_block = Some(Box::new(Stmt::Block(self.block_statement()?)));
+        }
+
+        if catch_block.is_none() && finally_block.is_none() {
+            return Err("Missing catch or finally clause after try".to_string());
+        }
+
+        Ok(Stmt::TryCatch {
+            try_block,
+            catch_param,
+            catch_block,
+            finally_block,
+        })
+    }
+
+    fn throw_statement(&mut self) -> Result<Stmt, String> {
+        let expr = self.expression()?;
+        self.match_token(&TokenKind::Semicolon);
+        Ok(Stmt::Throw(expr))
     }
 
     fn if_statement(&mut self) -> Result<Stmt, String> {
@@ -119,27 +179,33 @@ impl Parser {
 
         let init = if self.match_token(&TokenKind::Semicolon) {
             None
-        } else if self.match_token(&TokenKind::Let) || self.match_token(&TokenKind::Var) {
+        } else if self.match_token(&TokenKind::Let)
+            || self.match_token(&TokenKind::Var)
+            || self.match_token(&TokenKind::Const)
+        {
             Some(Box::new(self.var_declaration()?))
         } else {
-            Some(Box::new(self.expression_statement()?))
+            let expr = self.expression()?;
+            self.consume(&TokenKind::Semicolon, "Expected ';' after for init")?;
+            Some(Box::new(Stmt::Expr(expr)))
         };
 
-        let condition = if !self.check(&TokenKind::Semicolon) {
-            Some(self.expression()?)
-        } else {
+        let condition = if self.check(&TokenKind::Semicolon) {
             None
+        } else {
+            Some(self.expression()?)
         };
-        self.consume(&TokenKind::Semicolon, "Expected ';' after loop condition")?;
+        self.consume(&TokenKind::Semicolon, "Expected ';' after for condition")?;
 
-        let update = if !self.check(&TokenKind::RightParen) {
-            Some(self.expression()?)
-        } else {
+        let update = if self.check(&TokenKind::RightParen) {
             None
+        } else {
+            Some(self.expression()?)
         };
         self.consume(&TokenKind::RightParen, "Expected ')' after for clauses")?;
 
         let body = Box::new(self.statement()?);
+
         Ok(Stmt::For {
             init,
             condition,
@@ -184,15 +250,68 @@ impl Parser {
             let value = Box::new(self.assignment()?);
             match expr {
                 Expr::Identifier(target) => Ok(Expr::Assign { target, value }),
-                Expr::Member { object, property } => Ok(Expr::AssignProp {
-                    object,
-                    property,
-                    value,
-                }),
-                _ => Err(format!("Invalid assignment target at line {}", self.previous().line)),
+                Expr::Member { object, property } => {
+                    Ok(Expr::AssignProp { object, property, value })
+                }
+                Expr::Index { object, index } => {
+                    Ok(Expr::AssignIndex { object, index, value })
+                }
+                _ => Err(format!(
+                    "Invalid assignment target at line {}",
+                    self.previous().line
+                )),
             }
+        } else if self.match_token(&TokenKind::PlusEqual) {
+            let val = Box::new(self.assignment()?);
+            self.make_compound_assign(expr, BinaryOp::Add, val)
+        } else if self.match_token(&TokenKind::MinusEqual) {
+            let val = Box::new(self.assignment()?);
+            self.make_compound_assign(expr, BinaryOp::Sub, val)
+        } else if self.match_token(&TokenKind::StarEqual) {
+            let val = Box::new(self.assignment()?);
+            self.make_compound_assign(expr, BinaryOp::Mul, val)
+        } else if self.match_token(&TokenKind::SlashEqual) {
+            let val = Box::new(self.assignment()?);
+            self.make_compound_assign(expr, BinaryOp::Div, val)
         } else {
             Ok(expr)
+        }
+    }
+
+    fn make_compound_assign(
+        &self,
+        target: Expr,
+        op: BinaryOp,
+        val: Box<Expr>,
+    ) -> Result<Expr, String> {
+        match target {
+            Expr::Identifier(name) => Ok(Expr::Assign {
+                target: name.clone(),
+                value: Box::new(Expr::Binary {
+                    op,
+                    left: Box::new(Expr::Identifier(name)),
+                    right: val,
+                }),
+            }),
+            Expr::Member { object, property } => Ok(Expr::AssignProp {
+                object: object.clone(),
+                property: property.clone(),
+                value: Box::new(Expr::Binary {
+                    op,
+                    left: Box::new(Expr::Member { object, property }),
+                    right: val,
+                }),
+            }),
+            Expr::Index { object, index } => Ok(Expr::AssignIndex {
+                object: object.clone(),
+                index: index.clone(),
+                value: Box::new(Expr::Binary {
+                    op,
+                    left: Box::new(Expr::Index { object, index }),
+                    right: val,
+                }),
+            }),
+            _ => Err("Invalid compound assignment target".to_string()),
         }
     }
 
@@ -271,6 +390,10 @@ impl Parser {
             Some(BinaryOp::Less)
         } else if self.match_token(&TokenKind::LessEqual) {
             Some(BinaryOp::LessEqual)
+        } else if self.match_token(&TokenKind::InstanceOf) {
+            Some(BinaryOp::InstanceOf)
+        } else if self.match_token(&TokenKind::In) {
+            Some(BinaryOp::In)
         } else {
             None
         }
@@ -337,6 +460,21 @@ impl Parser {
                 op: UnaryOp::Negate,
                 expr,
             })
+        } else if self.match_token(&TokenKind::TypeOf) {
+            let expr = Box::new(self.unary()?);
+            Ok(Expr::Unary {
+                op: UnaryOp::TypeOf,
+                expr,
+            })
+        } else if self.match_token(&TokenKind::New) {
+            let callee = self.call()?;
+            match callee {
+                Expr::Call { callee, args } => Ok(Expr::New { callee, args }),
+                other => Ok(Expr::New {
+                    callee: Box::new(other),
+                    args: Vec::new(),
+                }),
+            }
         } else {
             self.call()
         }
@@ -364,11 +502,23 @@ impl Parser {
             } else if self.match_token(&TokenKind::Dot) {
                 let property = match self.advance().kind {
                     TokenKind::Identifier(p) => p,
-                    _ => return Err(format!("Expected property name after '.' at line {}", self.previous().line)),
+                    _ => {
+                        return Err(format!(
+                            "Expected property name after '.' at line {}",
+                            self.previous().line
+                        ))
+                    }
                 };
                 expr = Expr::Member {
                     object: Box::new(expr),
                     property,
+                };
+            } else if self.match_token(&TokenKind::LeftBracket) {
+                let index = self.expression()?;
+                self.consume(&TokenKind::RightBracket, "Expected ']' after index")?;
+                expr = Expr::Index {
+                    object: Box::new(expr),
+                    index: Box::new(index),
                 };
             } else {
                 break;
@@ -391,6 +541,84 @@ impl Parser {
         if self.match_token(&TokenKind::Undefined) {
             return Ok(Expr::Undefined);
         }
+        if self.match_token(&TokenKind::This) {
+            return Ok(Expr::This);
+        }
+
+        // Array literal [a, b, c]
+        if self.match_token(&TokenKind::LeftBracket) {
+            let mut items = Vec::new();
+            if !self.check(&TokenKind::RightBracket) {
+                loop {
+                    items.push(self.expression()?);
+                    if !self.match_token(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightBracket, "Expected ']' after array elements")?;
+            return Ok(Expr::Array(items));
+        }
+
+        // Object literal { key: val, ... }
+        if self.match_token(&TokenKind::LeftBrace) {
+            let mut entries = Vec::new();
+            if !self.check(&TokenKind::RightBrace) {
+                loop {
+                    let key = match self.advance().kind {
+                        TokenKind::Identifier(k) => k,
+                        TokenKind::String(s) => s,
+                        _ => {
+                            return Err(format!(
+                                "Expected property key in object literal at line {}",
+                                self.previous().line
+                            ))
+                        }
+                    };
+                    self.consume(&TokenKind::Colon, "Expected ':' after property key")?;
+                    let val = self.expression()?;
+                    entries.push((key, val));
+                    if !self.match_token(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightBrace, "Expected '}' after object properties")?;
+            return Ok(Expr::Object(entries));
+        }
+
+        // Function expression: function [name](params) { body }
+        if self.match_token(&TokenKind::Function) {
+            let name = if let TokenKind::Identifier(n) = &self.peek().kind {
+                let n = n.clone();
+                self.advance();
+                Some(n)
+            } else {
+                None
+            };
+            self.consume(&TokenKind::LeftParen, "Expected '(' after function")?;
+            let mut params = Vec::new();
+            if !self.check(&TokenKind::RightParen) {
+                loop {
+                    match self.advance().kind {
+                        TokenKind::Identifier(p) => params.push(p),
+                        _ => {
+                            return Err(format!(
+                                "Expected parameter name at line {}",
+                                self.previous().line
+                            ))
+                        }
+                    }
+                    if !self.match_token(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightParen, "Expected ')' after parameters")?;
+            self.consume(&TokenKind::LeftBrace, "Expected '{' before function body")?;
+            let body = self.block_statement()?;
+            return Ok(Expr::FunctionExpr { name, params, body });
+        }
 
         let token = self.advance();
         match token.kind {
@@ -402,7 +630,10 @@ impl Parser {
                 self.consume(&TokenKind::RightParen, "Expected ')' after expression")?;
                 Ok(expr)
             }
-            _ => Err(format!("Unexpected token {:?} at line {}", token.kind, token.line)),
+            _ => Err(format!(
+                "Unexpected token {:?} at line {}",
+                token.kind, token.line
+            )),
         }
     }
 

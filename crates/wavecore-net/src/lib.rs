@@ -30,7 +30,24 @@ impl std::error::Error for NetError {}
 
 pub fn fetch_resource(url_or_path: &str) -> Result<ResourceResponse, NetError> {
     let trimmed = url_or_path.trim();
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+    if trimmed.starts_with("data:") {
+        let rest = &trimmed[5..];
+        let (metadata, data) = if let Some(comma_pos) = rest.find(',') {
+            (&rest[..comma_pos], &rest[comma_pos + 1..])
+        } else {
+            ("text/plain", rest)
+        };
+        let content_type = if metadata.is_empty() {
+            "text/plain".to_string()
+        } else {
+            metadata.split(';').next().unwrap_or("text/plain").to_string()
+        };
+        Ok(ResourceResponse {
+            url: trimmed.to_string(),
+            content: data.to_string(),
+            content_type,
+        })
+    } else if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         let resp = ureq::get(trimmed)
             .set("User-Agent", "WaveCore/0.1 (Experimental Browser Engine; Rust)")
             .call()

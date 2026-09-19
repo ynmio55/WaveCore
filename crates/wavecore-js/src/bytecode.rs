@@ -9,10 +9,11 @@ pub enum OpCode {
     True,
     False,
     Pop,
+    GetVar(String),
+    SetVar(String),
+    DeclVar(String),
     GetGlobal(String),
     SetGlobal(String),
-    GetLocal(u16),
-    SetLocal(u16),
     Add,
     Sub,
     Mul,
@@ -28,6 +29,7 @@ pub enum OpCode {
     LessEqual,
     Not,
     Negate,
+    TypeOf,
     Jump(usize),
     JumpIfFalse(usize),
     Loop(usize),
@@ -35,6 +37,20 @@ pub enum OpCode {
     Return,
     GetProp(String),
     SetProp(String),
+    GetIndex,
+    SetIndex,
+    CreateArray(usize),
+    CreateObject(usize),
+    MakeClosure {
+        chunk_index: usize,
+        name: String,
+        params: Vec<String>,
+    },
+    PushTry {
+        catch_ip: usize,
+    },
+    PopTry,
+    Throw,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -62,7 +78,6 @@ impl Chunk {
 pub struct Compiler {
     pub chunks: Vec<Chunk>,
     pub current_chunk: usize,
-    locals: Vec<Vec<String>>,
 }
 
 impl Compiler {
@@ -70,7 +85,6 @@ impl Compiler {
         Self {
             chunks: vec![Chunk::new()],
             current_chunk: 0,
-            locals: vec![Vec::new()],
         }
     }
 
@@ -103,16 +117,7 @@ impl Compiler {
                 } else {
                     self.chunk_mut().write_op(OpCode::Undefined);
                 }
-
-                if self.locals.last().unwrap().is_empty() && self.current_chunk == 0 {
-                    // Global variable
-                    self.chunk_mut().write_op(OpCode::SetGlobal(name.clone()));
-                } else {
-                    // Local variable in current frame
-                    let idx = self.locals.last().unwrap().len() as u16;
-                    self.locals.last_mut().unwrap().push(name.clone());
-                    self.chunk_mut().write_op(OpCode::SetLocal(idx));
-                }
+                self.chunk_mut().write_op(OpCode::DeclVar(name.clone()));
             }
             Stmt::Expr(expr) => {
                 self.compile_expr(expr)?;
@@ -130,22 +135,18 @@ impl Compiler {
             } => {
                 self.compile_expr(condition)?;
                 let then_jump = self.chunk_mut().write_op(OpCode::JumpIfFalse(0));
-                self.chunk_mut().write_op(OpCode::Pop); // pop condition
+                self.chunk_mut().write_op(OpCode::Pop);
 
                 self.compile_stmt(then_branch)?;
 
                 let else_jump = self.chunk_mut().write_op(OpCode::Jump(0));
-
-                // Patch then_jump
                 let after_then = self.chunk_mut().code.len();
                 self.chunk_mut().code[then_jump] = OpCode::JumpIfFalse(after_then);
-
-                self.chunk_mut().write_op(OpCode::Pop); // pop condition on false path
+                self.chunk_mut().write_op(OpCode::Pop);
 
                 if let Some(else_b) = else_branch {
                     self.compile_stmt(else_b)?;
                 }
-
                 let after_else = self.chunk_mut().code.len();
                 self.chunk_mut().code[else_jump] = OpCode::Jump(after_else);
             }
@@ -202,26 +203,20 @@ impl Compiler {
                 let old_chunk = self.current_chunk;
                 self.current_chunk = func_chunk_idx;
 
-                self.locals.push(params.clone());
                 for s in body {
                     self.compile_stmt(s)?;
                 }
                 self.chunk_mut().write_op(OpCode::Undefined);
                 self.chunk_mut().write_op(OpCode::Return);
-                self.locals.pop();
 
                 self.current_chunk = old_chunk;
 
-                let func_obj = crate::value::JsFunction {
+                self.chunk_mut().write_op(OpCode::MakeClosure {
+                    chunk_index: func_chunk_idx,
                     name: name.clone(),
                     params: params.clone(),
-                    chunk_index: func_chunk_idx,
-                };
-                let c_idx = self
-                    .chunk_mut()
-                    .add_constant(JsValue::Function(std::rc::Rc::new(func_obj)));
-                self.chunk_mut().write_op(OpCode::Constant(c_idx));
-                self.chunk_mut().write_op(OpCode::SetGlobal(name.clone()));
+                });
+                self.chunk_mut().write_op(OpCode::DeclVar(name.clone()));
             }
             Stmt::Return(val) => {
                 if let Some(expr) = val {
@@ -230,6 +225,44 @@ impl Compiler {
                     self.chunk_mut().write_op(OpCode::Undefined);
                 }
                 self.chunk_mut().write_op(OpCode::Return);
+            }
+            Stmt::TryCatch {
+                try_block,
+                catch_param,
+                catch_block,
+                finally_block,
+            } => {
+                let push_try_ip = self.chunk_mut().write_op(OpCode::PushTry { catch_ip: 0 });
+                self.compile_stmt(try_block)?;
+                self.chunk_mut().write_op(OpCode::PopTry);
+
+                let jump_over_catch = self.chunk_mut().write_op(OpCode::Jump(0));
+                let catch_target = self.chunk_mut().code.len();
+                self.chunk_mut().code[push_try_ip] = OpCode::PushTry {
+                    catch_ip: catch_target,
+                };
+
+                if let Some(c_block) = catch_block {
+                    if let Some(param) = catch_param {
+                        self.chunk_mut().write_op(OpCode::DeclVar(param.clone()));
+                    } else {
+                        self.chunk_mut().write_op(OpCode::Pop);
+                    }
+                    self.compile_stmt(c_block)?;
+                } else {
+                    self.chunk_mut().write_op(OpCode::Pop);
+                }
+
+                let after_catch = self.chunk_mut().code.len();
+                self.chunk_mut().code[jump_over_catch] = OpCode::Jump(after_catch);
+
+                if let Some(f_block) = finally_block {
+                    self.compile_stmt(f_block)?;
+                }
+            }
+            Stmt::Throw(expr) => {
+                self.compile_expr(expr)?;
+                self.chunk_mut().write_op(OpCode::Throw);
             }
         }
         Ok(())
@@ -258,20 +291,15 @@ impl Compiler {
             Expr::Undefined => {
                 self.chunk_mut().write_op(OpCode::Undefined);
             }
+            Expr::This => {
+                self.chunk_mut().write_op(OpCode::GetVar("this".to_string()));
+            }
             Expr::Identifier(name) => {
-                if let Some(local_idx) = self.resolve_local(name) {
-                    self.chunk_mut().write_op(OpCode::GetLocal(local_idx));
-                } else {
-                    self.chunk_mut().write_op(OpCode::GetGlobal(name.clone()));
-                }
+                self.chunk_mut().write_op(OpCode::GetVar(name.clone()));
             }
             Expr::Assign { target, value } => {
                 self.compile_expr(value)?;
-                if let Some(local_idx) = self.resolve_local(target) {
-                    self.chunk_mut().write_op(OpCode::SetLocal(local_idx));
-                } else {
-                    self.chunk_mut().write_op(OpCode::SetGlobal(target.clone()));
-                }
+                self.chunk_mut().write_op(OpCode::SetVar(target.clone()));
             }
             Expr::AssignProp {
                 object,
@@ -282,9 +310,65 @@ impl Compiler {
                 self.compile_expr(value)?;
                 self.chunk_mut().write_op(OpCode::SetProp(property.clone()));
             }
+            Expr::AssignIndex {
+                object,
+                index,
+                value,
+            } => {
+                self.compile_expr(object)?;
+                self.compile_expr(index)?;
+                self.compile_expr(value)?;
+                self.chunk_mut().write_op(OpCode::SetIndex);
+            }
             Expr::Member { object, property } => {
                 self.compile_expr(object)?;
                 self.chunk_mut().write_op(OpCode::GetProp(property.clone()));
+            }
+            Expr::Index { object, index } => {
+                self.compile_expr(object)?;
+                self.compile_expr(index)?;
+                self.chunk_mut().write_op(OpCode::GetIndex);
+            }
+            Expr::Array(items) => {
+                for item in items {
+                    self.compile_expr(item)?;
+                }
+                self.chunk_mut().write_op(OpCode::CreateArray(items.len()));
+            }
+            Expr::Object(entries) => {
+                for (k, v) in entries {
+                    let k_idx = self.chunk_mut().add_constant(JsValue::String(k.clone()));
+                    self.chunk_mut().write_op(OpCode::Constant(k_idx));
+                    self.compile_expr(v)?;
+                }
+                self.chunk_mut().write_op(OpCode::CreateObject(entries.len()));
+            }
+            Expr::FunctionExpr { name, params, body } => {
+                let func_chunk_idx = self.chunks.len();
+                self.chunks.push(Chunk::new());
+                let old_chunk = self.current_chunk;
+                self.current_chunk = func_chunk_idx;
+
+                for s in body {
+                    self.compile_stmt(s)?;
+                }
+                self.chunk_mut().write_op(OpCode::Undefined);
+                self.chunk_mut().write_op(OpCode::Return);
+
+                self.current_chunk = old_chunk;
+
+                self.chunk_mut().write_op(OpCode::MakeClosure {
+                    chunk_index: func_chunk_idx,
+                    name: name.clone().unwrap_or_default(),
+                    params: params.clone(),
+                });
+            }
+            Expr::New { callee, args } => {
+                self.compile_expr(callee)?;
+                for arg in args {
+                    self.compile_expr(arg)?;
+                }
+                self.chunk_mut().write_op(OpCode::Call(args.len()));
             }
             Expr::Binary { op, left, right } => {
                 self.compile_expr(left)?;
@@ -303,8 +387,11 @@ impl Compiler {
                     BinaryOp::GreaterEqual => self.chunk_mut().write_op(OpCode::GreaterEqual),
                     BinaryOp::Less => self.chunk_mut().write_op(OpCode::Less),
                     BinaryOp::LessEqual => self.chunk_mut().write_op(OpCode::LessEqual),
-                    BinaryOp::And => self.chunk_mut().write_op(OpCode::Equal), // Fallback
+                    BinaryOp::And => self.chunk_mut().write_op(OpCode::Equal),
                     BinaryOp::Or => self.chunk_mut().write_op(OpCode::Equal),
+                    BinaryOp::InstanceOf | BinaryOp::In => {
+                        self.chunk_mut().write_op(OpCode::Equal)
+                    }
                 };
             }
             Expr::Unary { op, expr } => {
@@ -312,6 +399,7 @@ impl Compiler {
                 match op {
                     UnaryOp::Not => self.chunk_mut().write_op(OpCode::Not),
                     UnaryOp::Negate => self.chunk_mut().write_op(OpCode::Negate),
+                    UnaryOp::TypeOf => self.chunk_mut().write_op(OpCode::TypeOf),
                 };
             }
             Expr::Call { callee, args } => {
@@ -323,15 +411,5 @@ impl Compiler {
             }
         }
         Ok(())
-    }
-
-    fn resolve_local(&self, name: &str) -> Option<u16> {
-        let frame = self.locals.last()?;
-        for (i, n) in frame.iter().enumerate().rev() {
-            if n == name {
-                return Some(i as u16);
-            }
-        }
-        None
     }
 }
