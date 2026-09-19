@@ -352,14 +352,15 @@ impl DomBridge {
     }
 
     pub fn dispatch_event(&self, vm: &mut VM, target_id: &str, event_name: &str) -> bool {
-        self.dispatch_event_bubbling(vm, target_id, event_name)
+        self.dispatch_event_with_data(vm, target_id, event_name, None)
     }
 
-    pub fn dispatch_event_bubbling(
+    pub fn dispatch_event_with_data(
         &self,
         vm: &mut VM,
         target_id: &str,
         event_name: &str,
+        data: Option<&str>,
     ) -> bool {
         let path_ids = {
             let root = self.root.borrow();
@@ -399,6 +400,9 @@ impl DomBridge {
                 event.set("targetId", JsValue::String(target_id.to_string()));
                 event.set("currentTargetId", JsValue::String(current_id.clone()));
                 event.set("bubbles", JsValue::Boolean(true));
+                if let Some(data) = data {
+                    event.set("data", JsValue::String(data.to_string()));
+                }
 
                 let prevented = default_prevented.clone();
                 event.set(
