@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::{env, fs, process};
+use std::{env, fs, path::PathBuf, process};
 use wavecore_dom::Node;
 use wavecore_html::{extract_scripts, extract_styles};
 use wavecore_js::{eval_script, DomBridge, JsObject, JsValue, VM};
@@ -18,6 +18,22 @@ struct BrowserState {
     focused_id: Option<String>,
 }
 
+fn profile_root() -> PathBuf {
+    if let Ok(custom) = env::var("WAVECORE_PROFILE_DIR") {
+        return PathBuf::from(custom);
+    }
+    if let Ok(home) = env::var("HOME") {
+        return PathBuf::from(home).join(".local").join("share").join("wavecore");
+    }
+    if let Ok(profile) = env::var("USERPROFILE") {
+        return PathBuf::from(profile)
+            .join("AppData")
+            .join("Local")
+            .join("WaveCore");
+    }
+    PathBuf::from(".wavecore")
+}
+
 fn prepare_document(
     url: &str,
     extra_css: &str,
@@ -27,11 +43,12 @@ fn prepare_document(
     let dom = Rc::new(RefCell::new(parsed_dom));
 
     let mut vm = VM::new();
-    let bridge = DomBridge::new(dom.clone());
+    let bridge = DomBridge::with_url(dom.clone(), url);
     bridge.attach_to_vm(&mut vm);
 
-    // Setup LocalStorage in VM
-    let local_storage = WebStorage::new_in_memory();
+    // Persistent localStorage, isolated by the current page/origin key.
+    let storage_dir = profile_root().join("local-storage");
+    let local_storage = WebStorage::new_persistent(&storage_dir, url);
     let ls_ref = Rc::new(RefCell::new(local_storage));
     let mut ls_obj = JsObject::new();
 
@@ -195,6 +212,13 @@ fn main() {
             let mut full_repaint = false;
             let mut damage_doc: Vec<Rect> = Vec::new();
             let mut needs_navigate = None;
+
+            // Run due setTimeout callbacks on the browser event loop.
+            // Timer callbacks may mutate the DOM, so conservatively relayout/repaint.
+            if state.bridge.dispatch_due_timers(&mut state.vm) > 0 {
+                needs_re_render = true;
+                full_repaint = true;
+            }
 
             for event in events {
                 match event {
