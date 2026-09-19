@@ -178,10 +178,51 @@ fn length(v: Option<&String>, base: f32) -> Option<f32> {
     if s == "auto" {
         return None;
     }
+    if let Some(inner) = s.strip_prefix("calc(").and_then(|v| v.strip_suffix(')')) {
+        return calc_length(inner, base);
+    }
+    length_atom(s, base)
+}
+
+fn length_atom(s: &str, base: f32) -> Option<f32> {
+    let s = s.trim();
     if let Some(p) = s.strip_suffix('%') {
         return p.trim().parse::<f32>().ok().map(|n| base * n / 100.0);
     }
-    s.strip_suffix("px").unwrap_or(s).parse().ok()
+    if let Some(px) = s.strip_suffix("px") {
+        return px.trim().parse().ok();
+    }
+    if let Some(rem) = s.strip_suffix("rem") {
+        return rem.trim().parse::<f32>().ok().map(|n| n * 16.0);
+    }
+    s.parse().ok()
+}
+
+fn calc_length(expr: &str, base: f32) -> Option<f32> {
+    let mut total = 0.0f32;
+    let mut sign = 1.0f32;
+    let mut token = String::new();
+
+    let flush = |token: &mut String, sign: f32, total: &mut f32| -> Option<()> {
+        if token.trim().is_empty() {
+            return Some(());
+        }
+        *total += sign * length_atom(token.trim(), base)?;
+        token.clear();
+        Some(())
+    };
+
+    for ch in expr.chars() {
+        match ch {
+            '+' | '-' => {
+                flush(&mut token, sign, &mut total)?;
+                sign = if ch == '+' { 1.0 } else { -1.0 };
+            }
+            _ => token.push(ch),
+        }
+    }
+    flush(&mut token, sign, &mut total)?;
+    Some(total.max(0.0))
 }
 
 fn font_size(n: &StyledNode, parent: Option<f32>) -> f32 {
@@ -458,18 +499,32 @@ fn layout_at(
             let total_gap = (count - 1.0) * gap;
             let default_item_w = ((cw - total_gap) / count).max(40.0);
 
-            for child in child_nodes {
-                let grow = child
-                    .properties
-                    .get("flex-grow")
-                    .and_then(|v| v.trim().parse::<f32>().ok())
-                    .unwrap_or(0.0);
-                let base_w = length(child.properties.get("width"), cw).unwrap_or(default_item_w);
-                let item_w = if grow > 0.0 {
-                    (base_w + grow * 40.0).min(cw)
+            let flex_metrics: Vec<(f32, f32)> = child_nodes
+                .iter()
+                .map(|child| {
+                    let grow = child
+                        .properties
+                        .get("flex-grow")
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                        .unwrap_or(0.0)
+                        .max(0.0);
+                    let explicit = length(child.properties.get("width"), cw);
+                    let base = explicit.unwrap_or_else(|| if grow > 0.0 { 0.0 } else { default_item_w });
+                    (base, grow)
+                })
+                .collect();
+            let total_base: f32 = flex_metrics.iter().map(|(base, _)| *base).sum();
+            let total_grow: f32 = flex_metrics.iter().map(|(_, grow)| *grow).sum();
+            let free_space = (cw - total_gap - total_base).max(0.0);
+
+            for (idx, child) in child_nodes.into_iter().enumerate() {
+                let (base_w, grow) = flex_metrics[idx];
+                let item_w = if !flex_wrap && grow > 0.0 && total_grow > 0.0 {
+                    base_w + free_space * (grow / total_grow)
                 } else {
                     base_w
-                };
+                }
+                .min(cw);
 
                 if flex_wrap && (cursor_x + item_w - cx > cw) && cursor_x > cx {
                     cursor_x = cx;
@@ -850,6 +905,25 @@ mod tests {
         let _ = cache.layout(&styled, 800.0, false);
         assert_eq!(cache.stats.invalidations, 1);
         assert_eq!(cache.stats.misses, 2);
+    }
+
+    #[test]
+    fn calc_lengths_and_flex_grow_distribution() {
+        let a = Node::element("div", vec![Node::text("A")]);
+        let b = Node::element("div", vec![Node::text("B")]);
+        let root = Node::element("section", vec![a, b]);
+        let css = "section { display:flex; width:400px; gap:10px; } section > div { flex-grow:1; }";
+        let l = layout(&style_tree(&root, &parse(css)), 800.0);
+        assert_eq!(l.children.len(), 2);
+        assert!((l.children[0].rect.width - 195.0).abs() < 0.01);
+        assert!((l.children[1].rect.width - 195.0).abs() < 0.01);
+
+        let root = Node::element("div", vec![]);
+        let l = layout(
+            &style_tree(&root, &parse("div { width: calc(100% - 20px); }")),
+            500.0,
+        );
+        assert!((l.content.width - 480.0).abs() < 0.01);
     }
 
 }
