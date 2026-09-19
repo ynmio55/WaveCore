@@ -141,6 +141,12 @@ impl Node {
         None
     }
 
+    pub fn query_selector_all_ids(&self, selector: &str) -> Vec<NodeId> {
+        let mut nodes = Vec::new();
+        self.query_selector_all(selector, &mut nodes);
+        nodes.into_iter().map(|node| node.id).collect()
+    }
+
     pub fn query_selector_all<'a>(&'a self, selector: &str, out: &mut Vec<&'a Node>) {
         let s = selector.trim();
         let matches = match &self.node_type {
