@@ -2,19 +2,29 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use wavecore_dom::Node;
+use wavecore_net::NetworkClient;
+use wavecore_sandbox::Origin;
 
 use crate::value::{JsObject, JsPromise, JsValue};
 use crate::vm::VM;
 
 static ELEMENT_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
+#[derive(Clone)]
+struct TimerEntry {
+    due: Instant,
+    callback: JsValue,
+}
+
 pub struct DomBridge {
     pub root: Rc<RefCell<Node>>,
     pub listeners: Rc<RefCell<HashMap<(String, String), Vec<JsValue>>>>,
     pub current_url: Rc<RefCell<String>>,
     pub history_stack: Rc<RefCell<Vec<String>>>,
-    pub timer_callbacks: Rc<RefCell<HashMap<usize, JsValue>>>,
+    timer_callbacks: Rc<RefCell<HashMap<usize, TimerEntry>>>,
+    network_client: Rc<RefCell<NetworkClient>>,
 }
 
 impl DomBridge {
@@ -25,6 +35,7 @@ impl DomBridge {
             current_url: Rc::new(RefCell::new("https://wavecore.local/".to_string())),
             history_stack: Rc::new(RefCell::new(vec!["https://wavecore.local/".to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
+            network_client: Rc::new(RefCell::new(NetworkClient::new())),
         }
     }
 
@@ -35,6 +46,7 @@ impl DomBridge {
             current_url: Rc::new(RefCell::new(url.to_string())),
             history_stack: Rc::new(RefCell::new(vec![url.to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
+            network_client: Rc::new(RefCell::new(NetworkClient::new())),
         }
     }
 
@@ -157,7 +169,18 @@ impl DomBridge {
         let set_timeout_fn = JsValue::native("setTimeout", move |_vm, args| {
             if let Some(cb) = args.first().cloned() {
                 let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-                timers_ref.borrow_mut().insert(id, cb);
+                let delay_ms = args
+                    .get(1)
+                    .map(|v| v.to_number().max(0.0))
+                    .unwrap_or(0.0)
+                    .min(86_400_000.0) as u64;
+                timers_ref.borrow_mut().insert(
+                    id,
+                    TimerEntry {
+                        due: Instant::now() + Duration::from_millis(delay_ms),
+                        callback: cb,
+                    },
+                );
                 Ok(JsValue::Number(id as f64))
             } else {
                 Ok(JsValue::Number(0.0))
@@ -194,16 +217,24 @@ impl DomBridge {
             }),
         );
 
-        // 6. Promise-based fetch(url)
+        // 6. Promise-based fetch(url) with persistent per-page network state.
+        // The same NetworkClient is reused so cookies and cache survive across fetch calls.
+        let fetch_client = self.network_client.clone();
+        let fetch_origin_url = self.current_url.clone();
         vm.set_global(
             "fetch",
-            JsValue::native("fetch", |_vm, args| {
+            JsValue::native("fetch", move |_vm, args| {
                 let url = args.first().map(|a| a.to_js_string()).unwrap_or_default();
-                match wavecore_net::fetch_resource(&url) {
+                let caller_origin = Origin::parse(&fetch_origin_url.borrow()).ok();
+                match fetch_client
+                    .borrow_mut()
+                    .fetch_with_origin(&url, caller_origin.as_ref())
+                {
                     Ok(res) => {
                         let mut resp_obj = JsObject::new();
-                        resp_obj.set("status", JsValue::Number(200.0));
-                        resp_obj.set("ok", JsValue::Boolean(true));
+                        resp_obj.set("status", JsValue::Number(res.status_code as f64));
+                        resp_obj.set("statusText", JsValue::String(res.status_text.clone()));
+                        resp_obj.set("ok", JsValue::Boolean(res.is_ok()));
                         resp_obj.set("url", JsValue::String(res.url.clone()));
                         resp_obj.set("contentType", JsValue::String(res.content_type.clone()));
 
@@ -221,6 +252,8 @@ impl DomBridge {
                         resp_obj.set(
                             "json",
                             JsValue::native("json", move |_vm, _args| {
+                                // Pulse does not yet expose a full JSON parser object model;
+                                // keep the response asynchronous and return the raw JSON text.
                                 Ok(JsValue::Promise(Rc::new(RefCell::new(
                                     JsPromise::resolved(JsValue::String(body_json.clone())),
                                 ))))
@@ -241,6 +274,32 @@ impl DomBridge {
                 }
             }),
         );
+    }
+
+    pub fn dispatch_due_timers(&self, vm: &mut VM) -> usize {
+        let now = Instant::now();
+        let due_ids: Vec<usize> = self
+            .timer_callbacks
+            .borrow()
+            .iter()
+            .filter_map(|(id, entry)| (entry.due <= now).then_some(*id))
+            .collect();
+
+        let mut callbacks = Vec::with_capacity(due_ids.len());
+        {
+            let mut timers = self.timer_callbacks.borrow_mut();
+            for id in due_ids {
+                if let Some(entry) = timers.remove(&id) {
+                    callbacks.push(entry.callback);
+                }
+            }
+        }
+
+        let count = callbacks.len();
+        for cb in callbacks {
+            let _ = vm.call_function(&cb, &[]);
+        }
+        count
     }
 
     pub fn dispatch_event(&self, vm: &mut VM, target_id: &str, event_name: &str) {
