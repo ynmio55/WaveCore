@@ -1,0 +1,7 @@
+[package]
+name = "wavecore-html"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wavecore-dom = { path = "../wavecore-dom" }
