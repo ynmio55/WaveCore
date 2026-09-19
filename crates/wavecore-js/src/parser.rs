@@ -244,7 +244,7 @@ impl Parser {
     }
 
     fn assignment(&mut self) -> Result<Expr, String> {
-        let expr = self.or()?;
+        let expr = self.conditional()?;
 
         if self.match_token(&TokenKind::Equal) {
             let value = Box::new(self.assignment()?);
@@ -312,6 +312,22 @@ impl Parser {
                 }),
             }),
             _ => Err("Invalid compound assignment target".to_string()),
+        }
+    }
+
+    fn conditional(&mut self) -> Result<Expr, String> {
+        let condition = self.or()?;
+        if self.match_token(&TokenKind::Question) {
+            let then_expr = self.assignment()?;
+            self.consume(&TokenKind::Colon, "Expected ':' in conditional expression")?;
+            let else_expr = self.assignment()?;
+            Ok(Expr::Conditional {
+                condition: Box::new(condition),
+                then_expr: Box::new(then_expr),
+                else_expr: Box::new(else_expr),
+            })
+        } else {
+            Ok(condition)
         }
     }
 
