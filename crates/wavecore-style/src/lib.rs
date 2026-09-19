@@ -234,7 +234,7 @@ fn matches_compound(selector: &str, element: &ElementData) -> bool {
     }
 
     let mut rest = selector;
-    if let Some(pos) = rest.find(['#', '.', '[', ':']) {
+    if let Some(pos) = rest.find(|ch| matches!(ch, '#' | '.' | '[' | ':')) {
         let tag = &rest[..pos];
         if !tag.is_empty() && tag != "*" && !tag.eq_ignore_ascii_case(&element.tag_name) {
             return false;
@@ -246,13 +246,13 @@ fn matches_compound(selector: &str, element: &ElementData) -> bool {
 
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix('#') {
-            let end = after.find(['#', '.', '[', ':']).unwrap_or(after.len());
+            let end = after.find(|ch| matches!(ch, '#' | '.' | '[' | ':')).unwrap_or(after.len());
             if element.id() != Some(&after[..end]) {
                 return false;
             }
             rest = &after[end..];
         } else if let Some(after) = rest.strip_prefix('.') {
-            let end = after.find(['#', '.', '[', ':']).unwrap_or(after.len());
+            let end = after.find(|ch| matches!(ch, '#' | '.' | '[' | ':')).unwrap_or(after.len());
             if !element.has_class(&after[..end]) {
                 return false;
             }
@@ -263,7 +263,7 @@ fn matches_compound(selector: &str, element: &ElementData) -> bool {
             };
             let expr = after[..end].trim();
             if let Some((name, expected)) = expr.split_once('=') {
-                let expected = expected.trim().trim_matches(['"', '\'']);
+                let expected = expected.trim().trim_matches(|ch| ch == '"' || ch == '\'');
                 if element.get_attribute(name.trim()) != Some(expected) {
                     return false;
                 }
