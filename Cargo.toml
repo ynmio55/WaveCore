@@ -1,5 +1,13 @@
 [workspace]
-members = ["crates/wavecore-dom", "crates/wavecore-html", "crates/wavecore-cli"]
+members = [
+  "crates/wavecore-dom",
+  "crates/wavecore-html",
+  "crates/wavecore-css",
+  "crates/wavecore-style",
+  "crates/wavecore-layout",
+  "crates/wavecore-render",
+  "crates/wavecore-cli",
+]
 resolver = "2"
 
 [workspace.package]
