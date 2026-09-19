@@ -274,6 +274,17 @@ impl RenderProcessSandbox {
             Ok(())
         }
     }
+
+    pub fn check_direct_network_access(&self) -> Result<(), String> {
+        if !self.can_access_network_directly {
+            Err(format!(
+                "SecurityError: Render process {} for origin {:?} must broker network access through the browser process",
+                self.process_id, self.origin
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -353,7 +364,9 @@ impl IsolatedRenderHost {
     }
 
     pub fn request_resource(&self, request_id: u64, url: &str) -> Result<(), String> {
-        self.sandbox.check_file_access()?;
+        // A sandboxed renderer must not open the network itself. Resource loads are
+        // intentionally brokered to the browser endpoint, which can apply cookies,
+        // CORS, cache policy, permissions, and auditing before returning ResourceData.
         self.endpoint.send(RenderToBrowserMessage::FetchResource {
             request_id,
             url: url.to_string(),
@@ -431,6 +444,25 @@ mod tests {
         let origin = Origin::parse("https://sandbox.test").unwrap();
         let sandbox = RenderProcessSandbox::new_isolated(42, origin);
         assert!(sandbox.check_file_access().is_err());
+        assert!(sandbox.check_direct_network_access().is_err());
+    }
+
+    #[test]
+    fn sandboxed_renderer_brokers_resource_requests() {
+        let (browser, renderer) = IpcChannel::create_pair();
+        let origin = Origin::parse("https://wavecore.dev").unwrap();
+        let host = IsolatedRenderHost::new(7, origin.clone(), renderer);
+
+        host.request_resource(99, "https://cdn.wavecore.dev/app.js").unwrap();
+
+        match browser.try_recv().unwrap() {
+            RenderToBrowserMessage::FetchResource { request_id, url, origin: msg_origin } => {
+                assert_eq!(request_id, 99);
+                assert_eq!(url, "https://cdn.wavecore.dev/app.js");
+                assert_eq!(msg_origin, origin);
+            }
+            other => panic!("Unexpected message: {other:?}"),
+        }
     }
 
     #[test]
