@@ -1,21 +1,14 @@
-use wavecore_layout::{LayoutBox, Rect};
-
-#[derive(Debug, Clone)]
-pub enum DisplayCommand {
-    Text { text: String, rect: Rect },
+use wavecore_layout::{Edges,LayoutBox,Rect};
+#[derive(Debug,Clone)]
+pub enum DisplayCommand{
+ FillRect{rect:Rect,color:String},
+ Border{rect:Rect,widths:Edges,color:String},
+ Text{text:String,rect:Rect},
 }
-
-pub fn build_display_list(layout: &LayoutBox) -> Vec<DisplayCommand> {
-    let mut list = Vec::new();
-    walk(layout, &mut list);
-    list
-}
-
-fn walk(layout: &LayoutBox, list: &mut Vec<DisplayCommand>) {
-    if let Some(text) = &layout.text {
-        if !text.trim().is_empty() {
-            list.push(DisplayCommand::Text { text: text.clone(), rect: layout.rect });
-        }
-    }
-    for child in &layout.children { walk(child, list); }
+pub fn build_display_list(layout:&LayoutBox)->Vec<DisplayCommand>{let mut v=vec![];walk(layout,&mut v);v}
+fn walk(b:&LayoutBox,v:&mut Vec<DisplayCommand>){
+ if let Some(bg)=&b.background{v.push(DisplayCommand::FillRect{rect:b.rect,color:bg.clone()});}
+ if b.border!=Edges::default(){v.push(DisplayCommand::Border{rect:b.rect,widths:b.border,color:b.border_color.clone().unwrap_or_else(||"#000000".into())});}
+ if let Some(t)=&b.text{if !t.trim().is_empty(){v.push(DisplayCommand::Text{text:t.clone(),rect:b.rect});}}
+ for c in &b.children{walk(c,v)}
 }
