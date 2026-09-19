@@ -145,6 +145,7 @@ pub enum NetError {
     TooManyRedirects(usize),
     Cors(String),
     CertificateInvalid(String),
+    ResourceLimitExceeded { limit_bytes: usize, actual_bytes: usize },
 }
 
 impl std::fmt::Display for NetError {
@@ -156,6 +157,10 @@ impl std::fmt::Display for NetError {
             NetError::TooManyRedirects(n) => write!(f, "Exceeded maximum redirect limit ({n})"),
             NetError::Cors(s) => write!(f, "{s}"),
             NetError::CertificateInvalid(s) => write!(f, "SSL/TLS certificate error: {s}"),
+            NetError::ResourceLimitExceeded { limit_bytes, actual_bytes } => write!(
+                f,
+                "Resource exceeds configured limit: {actual_bytes} bytes > {limit_bytes} bytes"
+            ),
         }
     }
 }
@@ -185,6 +190,7 @@ pub struct NetworkClient {
     pub user_agent: String,
     pub max_redirects: usize,
     pub tls_policy: TlsPolicy,
+    pub max_response_bytes: usize,
 }
 
 impl Default for NetworkClient {
@@ -195,6 +201,7 @@ impl Default for NetworkClient {
             user_agent: "WaveCore/0.2 (Production Engine Prototype; Linux/x86_64)".to_string(),
             max_redirects: 10,
             tls_policy: TlsPolicy::Strict,
+            max_response_bytes: 32 * 1024 * 1024,
         }
     }
 }
@@ -229,6 +236,12 @@ impl NetworkClient {
                 metadata.split(';').next().unwrap_or("text/plain").to_string()
             };
             let body_bytes = data.as_bytes().to_vec();
+            if body_bytes.len() > self.max_response_bytes {
+                return Err(NetError::ResourceLimitExceeded {
+                    limit_bytes: self.max_response_bytes,
+                    actual_bytes: body_bytes.len(),
+                });
+            }
             return Ok(HttpResponse::new(
                 trimmed.to_string(),
                 200,
@@ -243,6 +256,15 @@ impl NetworkClient {
         if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
             let clean_path = trimmed.strip_prefix("file://").unwrap_or(trimmed);
             let path = Path::new(clean_path);
+            if let Ok(meta) = fs::metadata(path) {
+                let actual = meta.len() as usize;
+                if actual > self.max_response_bytes {
+                    return Err(NetError::ResourceLimitExceeded {
+                        limit_bytes: self.max_response_bytes,
+                        actual_bytes: actual,
+                    });
+                }
+            }
             let body_bytes = fs::read(path).map_err(NetError::Io)?;
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let content_type = match ext {
@@ -409,9 +431,17 @@ impl NetworkClient {
             let content_type = response.content_type().to_string();
 
             // Stream / read response body into bytes
-            let mut reader = response.into_reader();
+            let mut reader = response
+                .into_reader()
+                .take(self.max_response_bytes.saturating_add(1) as u64);
             let mut body_bytes = Vec::new();
             reader.read_to_end(&mut body_bytes).map_err(NetError::Io)?;
+            if body_bytes.len() > self.max_response_bytes {
+                return Err(NetError::ResourceLimitExceeded {
+                    limit_bytes: self.max_response_bytes,
+                    actual_bytes: body_bytes.len(),
+                });
+            }
 
             // Parse Cache-Control
             let cc = headers_map
@@ -641,4 +671,18 @@ mod tests {
         assert!(resp.text().contains("Your connection is not private"));
         assert!(resp.text().contains("CERT_COMMON_NAME_INVALID"));
     }
+    #[test]
+    fn response_size_limit_rejects_oversized_data_uri() {
+        let mut client = NetworkClient::new();
+        client.max_response_bytes = 8;
+        let err = client.fetch("data:text/plain,0123456789").unwrap_err();
+        assert!(matches!(
+            err,
+            NetError::ResourceLimitExceeded {
+                limit_bytes: 8,
+                actual_bytes: 10
+            }
+        ));
+    }
+
 }
