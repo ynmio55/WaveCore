@@ -28,6 +28,13 @@ impl<'a> Parser<'a> {
     fn parse_nodes(&mut self, closing: Option<&str>) -> Vec<Node> {
         let mut nodes=Vec::new();
         while self.pos < self.input.len() {
+            if let Some(parent) = closing {
+                if let Some(next) = self.peek_start_tag_name() {
+                    if should_implicitly_close(parent, &next) {
+                        break;
+                    }
+                }
+            }
             if self.starts_with("<!--") { self.pos+=4; self.consume_through("-->"); continue; }
             if self.starts_with("<!") || self.starts_with("<?") { self.consume_through(">"); continue; }
             if self.starts_with("</") {
@@ -71,10 +78,46 @@ impl<'a> Parser<'a> {
         } nodes
     }
     fn starts_with(&self,s:&str)->bool{self.input[self.pos..].starts_with(s)}
+    fn peek_start_tag_name(&self) -> Option<String> {
+        if !self.starts_with("<") || self.starts_with("</") || self.starts_with("<!") || self.starts_with("<?") {
+            return None;
+        }
+        let rest = &self.input[self.pos + 1..];
+        let mut name = String::new();
+        for ch in rest.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == ':' {
+                name.push(ch.to_ascii_lowercase());
+            } else {
+                break;
+            }
+        }
+        (!name.is_empty()).then_some(name)
+    }
     fn consume_until(&mut self,ch:char)->String{let start=self.pos; while self.pos<self.input.len()&&self.input[self.pos..].chars().next()!=Some(ch){self.pos+=self.input[self.pos..].chars().next().unwrap().len_utf8();} self.input[start..self.pos].to_owned()}
     fn consume_char(&mut self,c:char){if self.input[self.pos..].chars().next()==Some(c){self.pos+=c.len_utf8();}}
     fn consume_through(&mut self,needle:&str){if let Some(i)=self.input[self.pos..].find(needle){self.pos+=i+needle.len()}else{self.pos=self.input.len()}}
 }
+
+fn should_implicitly_close(parent: &str, next: &str) -> bool {
+    match parent.to_ascii_lowercase().as_str() {
+        "p" => matches!(
+            next,
+            "address" | "article" | "aside" | "blockquote" | "div" | "dl" | "fieldset"
+                | "footer" | "form" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                | "header" | "hr" | "main" | "nav" | "ol" | "p" | "pre" | "section"
+                | "table" | "ul"
+        ),
+        "li" => next == "li",
+        "dt" | "dd" => matches!(next, "dt" | "dd"),
+        "thead" => matches!(next, "tbody" | "tfoot"),
+        "tbody" => matches!(next, "tbody" | "tfoot"),
+        "tr" => next == "tr",
+        "th" | "td" => matches!(next, "th" | "td"),
+        "option" => matches!(next, "option" | "optgroup"),
+        _ => false,
+    }
+}
+
 fn parse_start_tag(raw:&str)->(String,BTreeMap<String,String>){
     let mut chars=raw.char_indices().peekable(); let mut end=0;
     while let Some((i,c))=chars.peek().copied(){if c.is_whitespace(){break} end=i+c.len_utf8(); chars.next();}
@@ -268,4 +311,20 @@ mod tests {
         let (_, mode_quirks) = parse_with_mode("<div>No doctype page</div>");
         assert_eq!(mode_quirks, DocumentMode::Quirks);
     }
+    #[test]
+    fn implied_end_tags_recover_common_malformed_html() {
+        let dom = parse("<ul><li>one<li>two<li>three</ul>");
+        let ul = &dom.children[0];
+        assert_eq!(ul.children.len(), 3);
+        assert_eq!(ul.children[0].inner_text(), "one");
+        assert_eq!(ul.children[1].inner_text(), "two");
+        assert_eq!(ul.children[2].inner_text(), "three");
+
+        let dom = parse("<p>intro<div>block</div><p>after");
+        assert_eq!(dom.children.len(), 3);
+        assert_eq!(dom.children[0].tag_name(), Some("p"));
+        assert_eq!(dom.children[1].tag_name(), Some("div"));
+        assert_eq!(dom.children[2].tag_name(), Some("p"));
+    }
+
 }
