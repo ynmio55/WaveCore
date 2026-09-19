@@ -57,6 +57,7 @@ pub enum TokenKind {
     Comma,
     Semicolon,
     Colon,
+    Question,
     LeftParen,
     RightParen,
     LeftBrace,
@@ -115,6 +116,7 @@ impl<'a> Lexer<'a> {
                 ',' => TokenKind::Comma,
                 ';' => TokenKind::Semicolon,
                 ':' => TokenKind::Colon,
+                '?' => TokenKind::Question,
                 '.' => TokenKind::Dot,
                 '+' => {
                     if self.match_char('=') {
