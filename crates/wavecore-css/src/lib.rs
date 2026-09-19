@@ -123,16 +123,8 @@ pub fn parse_declarations(body: &str) -> BTreeMap<String, String> {
     let mut start = 0usize;
     let mut depth = 0usize;
     let mut quote: Option<char> = None;
-    let chars: Vec<(usize, char)> = body.char_indices().collect();
 
-    let mut flush = |end: usize| {
-        let decl = body[start..end].trim();
-        if let Some((name, value)) = split_declaration(decl) {
-            declarations.insert(name.to_ascii_lowercase(), value.to_string());
-        }
-    };
-
-    for (idx, ch) in chars {
+    for (idx, ch) in body.char_indices() {
         if let Some(q) = quote {
             if ch == q {
                 quote = None;
@@ -144,13 +136,20 @@ pub fn parse_declarations(body: &str) -> BTreeMap<String, String> {
             '(' | '[' => depth += 1,
             ')' | ']' => depth = depth.saturating_sub(1),
             ';' if depth == 0 => {
-                flush(idx);
+                let decl = body[start..idx].trim();
+                if let Some((name, value)) = split_declaration(decl) {
+                    declarations.insert(name.to_ascii_lowercase(), value.to_string());
+                }
                 start = idx + ch.len_utf8();
             }
             _ => {}
         }
     }
-    flush(body.len());
+
+    let decl = body[start..].trim();
+    if let Some((name, value)) = split_declaration(decl) {
+        declarations.insert(name.to_ascii_lowercase(), value.to_string());
+    }
     declarations
 }
 
