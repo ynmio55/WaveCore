@@ -40,13 +40,21 @@ impl DomBridge {
     }
 
     pub fn with_url(root: Rc<RefCell<Node>>, url: &str) -> Self {
+        Self::with_url_and_client(root, url, Rc::new(RefCell::new(NetworkClient::new())))
+    }
+
+    pub fn with_url_and_client(
+        root: Rc<RefCell<Node>>,
+        url: &str,
+        network_client: Rc<RefCell<NetworkClient>>,
+    ) -> Self {
         Self {
             root,
             listeners: Rc::new(RefCell::new(HashMap::new())),
             current_url: Rc::new(RefCell::new(url.to_string())),
             history_stack: Rc::new(RefCell::new(vec![url.to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
-            network_client: Rc::new(RefCell::new(NetworkClient::new())),
+            network_client,
         }
     }
 
