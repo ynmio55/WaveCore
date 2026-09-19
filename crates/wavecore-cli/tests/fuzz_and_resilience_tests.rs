@@ -10,6 +10,7 @@
 use wavecore_css::parse as parse_css;
 use wavecore_html::parse as parse_html;
 use wavecore_layout::layout;
+use wavecore_js::{lexer::Lexer, parser::Parser};
 use wavecore_sandbox::{IpcChannel, IsolatedRenderHost, Origin, ProcessStatus};
 use wavecore_style::style_tree;
 
@@ -113,4 +114,69 @@ fn resilience_render_crash_isolation_and_auto_respawn() {
     host.respawn(r_ep2);
     assert!(!host.is_crashed());
     assert_eq!(host.status, ProcessStatus::Running);
+}
+
+
+#[test]
+fn resilience_malformed_javascript_never_panics_parser() {
+    let cases = [
+        "function {",
+        "let = ;",
+        "if ((( true {",
+        "for (;;) { break",
+        "class X {",
+        "async function f(){ await",
+        "const x = \"unterminated",
+        "a?.?.b",
+    ];
+
+    for source in cases {
+        let result = std::panic::catch_unwind(|| {
+            if let Ok(tokens) = Lexer::new(source).tokenize() {
+                let _ = Parser::new(tokens).parse();
+            }
+        });
+        assert!(result.is_ok(), "parser panicked for input: {source:?}");
+    }
+}
+
+#[test]
+fn resilience_mixed_parser_mutation_corpus_no_panics() {
+    let seeds = [
+        "<div><style>.a{display:flex}</style><script>let x=1;</script></div>",
+        "<form><input id=x value=ไทย><button>go</button></form>",
+        "<canvas id=c width=64 height=64></canvas>",
+    ];
+
+    let mut state: u64 = 0x9E3779B97F4A7C15;
+    let mut next = || {
+        state ^= state << 7;
+        state ^= state >> 9;
+        state ^= state << 8;
+        state
+    };
+
+    for seed in seeds {
+        for _ in 0..250 {
+            let mut bytes = seed.as_bytes().to_vec();
+            if bytes.is_empty() {
+                continue;
+            }
+            for _ in 0..((next() % 8) + 1) {
+                let idx = (next() as usize) % bytes.len();
+                bytes[idx] = (next() & 0xff) as u8;
+            }
+
+            let input = String::from_utf8_lossy(&bytes).into_owned();
+            let outcome = std::panic::catch_unwind(|| {
+                let dom = parse_html(&input);
+                let css = parse_css(&input);
+                let _ = layout(&style_tree(&dom, &css), 1024.0);
+                if let Ok(tokens) = Lexer::new(&input).tokenize() {
+                    let _ = Parser::new(tokens).parse();
+                }
+            });
+            assert!(outcome.is_ok());
+        }
+    }
 }
