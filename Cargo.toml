@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/wavecore-dom", "crates/wavecore-html", "crates/wavecore-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
