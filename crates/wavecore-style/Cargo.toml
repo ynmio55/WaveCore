@@ -1,0 +1,8 @@
+[package]
+name = "wavecore-style"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wavecore-dom = { path = "../wavecore-dom" }
+wavecore-css = { path = "../wavecore-css" }
