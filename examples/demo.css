@@ -1,0 +1,53 @@
+body {
+  background-color: #f0f4f8;
+  padding: 20px;
+}
+
+.card {
+  background-color: #ffffff;
+  border-width: 1px;
+  border-color: #d0d7de;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.header {
+  border-color: #0969da;
+  border-width: 3px;
+  background-color: #f6f8fa;
+}
+
+.title {
+  color: #0969da;
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+
+.subtitle {
+  color: #57606a;
+  font-size: 14px;
+}
+
+.desc {
+  color: #24292f;
+  font-size: 15px;
+  margin-bottom: 12px;
+}
+
+.inner-box {
+  background-color: #ddf4ff;
+  border-width: 2px;
+  border-color: #54aeff;
+  color: #0550ae;
+  padding: 12px;
+  font-size: 16px;
+}
+
+.footer {
+  background-color: #24292f;
+}
+
+.note {
+  color: #ffffff;
+  font-size: 13px;
+}

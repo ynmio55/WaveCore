@@ -1,10 +1,9 @@
 [package]
-name = "wavecore-pixels"
+name = "wavecore-window"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+wavecore-pixels = { path = "../wavecore-pixels" }
 wavecore-render = { path = "../wavecore-render" }
-wavecore-text = { path = "../wavecore-text" }
-fontdue = "0.9"
-rustybuzz = "0.20"
+minifb = "0.28"

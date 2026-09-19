@@ -9,22 +9,100 @@ impl Default for TextStyle{fn default()->Self{Self{font_size:16.0,line_height:1.
 #[derive(Debug,Clone,PartialEq)]pub struct TextLine{pub text:String,pub width:f32}
 #[derive(Debug,Clone,PartialEq)]pub struct TextMetrics{pub lines:Vec<TextLine>,pub width:f32,pub height:f32,pub line_height:f32}
 
-pub struct FontSystem{db:Database}
-impl FontSystem{
- pub fn new()->Self{let mut db=Database::new();db.load_system_fonts();Self{db}}
- pub fn has_fonts(&self)->bool{self.db.faces().next().is_some()}
- pub fn shape(&self,text:&str,style:&TextStyle)->Option<Vec<Glyph>>{
-  let generic=Family::SansSerif;let named=style.families.first().map(|s|Family::Name(s.as_str()));let families=[named.unwrap_or(generic),generic];
-  let id=self.db.query(&Query{families:&families,..Query::default()})?;
-  self.db.with_face_data(id,|data,index|{
-   let face=Face::from_slice(data,index)?;let upem=face.units_per_em() as f32;let scale=style.font_size/upem;
-   let mut buffer=UnicodeBuffer::new();buffer.push_str(text);let out=rustybuzz::shape(&face,&[],buffer);
-   Some(out.glyph_infos().iter().zip(out.glyph_positions()).map(|(i,p)|Glyph{id:i.glyph_id,x_advance:p.x_advance as f32*scale+style.letter_spacing,x_offset:p.x_offset as f32*scale,y_offset:p.y_offset as f32*scale,cluster:i.cluster}).collect())
+pub struct FontSystem {
+    db: Database,
+}
+
+impl FontSystem {
+    pub fn new() -> Self {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        if let Some(home) = std::env::var_os("HOME") {
+            let user_fonts = std::path::Path::new(&home).join(".local/share/fonts");
+            if user_fonts.exists() {
+                db.load_fonts_dir(user_fonts);
+            }
+            let user_fonts2 = std::path::Path::new(&home).join(".fonts");
+            if user_fonts2.exists() {
+                db.load_fonts_dir(user_fonts2);
+            }
+        }
+        Self { db }
+    }
+
+    pub fn has_fonts(&self) -> bool {
+        self.db.faces().next().is_some()
+    }
+
+    pub fn query_id(&self, style: &TextStyle) -> Option<fontdb::ID> {
+        let named = style.families.first().map(|s| Family::Name(s.as_str()));
+        let candidates = [
+            named.unwrap_or(Family::Name("Sarabun")),
+            Family::Name("Sarabun"),
+            Family::Name("Noto Sans Thai"),
+            Family::SansSerif,
+            Family::Serif,
+            Family::Monospace,
+        ];
+        self.db.query(&Query {
+            families: &candidates,
+            weight: fontdb::Weight(style.weight),
+            style: if style.italic { fontdb::Style::Italic } else { fontdb::Style::Normal },
+            ..Query::default()
+        }).or_else(|| {
+            // Find Thai or Sarabun font if candidate query didn't match
+            for face in self.db.faces() {
+                let name = face.families.iter().map(|(n, _)| n.to_lowercase()).collect::<Vec<_>>().join(" ");
+                if name.contains("sarabun") || name.contains("thai") {
+                    return Some(face.id);
+                }
+            }
+            self.db.faces().next().map(|f| f.id)
+        })
+    }
+ pub fn shape(&self, text: &str, style: &TextStyle) -> Option<Vec<Glyph>> {
+  let id = self.query_id(style)?;
+  self.db.with_face_data(id, |data, index| {
+   let face = Face::from_slice(data, index)?;
+   let upem = face.units_per_em() as f32;
+   let scale = style.font_size / upem;
+   let mut buffer = UnicodeBuffer::new();
+   buffer.push_str(text);
+   let out = rustybuzz::shape(&face, &[], buffer);
+   Some(out.glyph_infos().iter().zip(out.glyph_positions()).map(|(i, p)| Glyph {
+    id: i.glyph_id,
+    x_advance: p.x_advance as f32 * scale + style.letter_spacing,
+    x_offset: p.x_offset as f32 * scale,
+    y_offset: p.y_offset as f32 * scale,
+    cluster: i.cluster,
+   }).collect())
   }).flatten()
  }
- pub fn font_bytes_for(&self,style:&TextStyle)->Option<(Vec<u8>,u32)>{
-  let family=style.families.first().map(|s|Family::Name(s.as_str())).unwrap_or(Family::SansSerif);let id=self.db.query(&Query{families:&[family,Family::SansSerif],..Query::default()})?;
-  self.db.with_face_data(id,|d,i|(d.to_vec(),i))
+ pub fn font_bytes_for(&self, style: &TextStyle) -> Option<(Vec<u8>, u32)> {
+  let id = self.query_id(style)?;
+  self.db.with_face_data(id, |d, i| (d.to_vec(), i))
+ }
+ pub fn fallback_fonts(&self) -> Vec<(Vec<u8>, u32)> {
+  let mut list = Vec::new();
+  let mut seen = std::collections::HashSet::new();
+  if let Some(id) = self.query_id(&TextStyle::default()) {
+   seen.insert(id);
+   if let Some(pair) = self.db.with_face_data(id, |d, i| (d.to_vec(), i)) {
+    list.push(pair);
+   }
+  }
+  for face in self.db.faces() {
+   if seen.contains(&face.id) { continue; }
+   let name = face.families.iter().map(|(n, _)| n.to_lowercase()).collect::<Vec<_>>().join(" ");
+   if name.contains("thai") || name.contains("sarabun") {
+    seen.insert(face.id);
+    if let Some(pair) = self.db.with_face_data(face.id, |d, i| (d.to_vec(), i)) {
+     list.push(pair);
+     break;
+    }
+   }
+  }
+  list
  }
 }
 impl Default for FontSystem{fn default()->Self{Self::new()}}
