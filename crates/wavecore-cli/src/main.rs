@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::{env, fs, path::PathBuf, process};
-use wavecore_dom::Node;
+use wavecore_dom::{Node, NodeId, NodeType};
 use wavecore_html::{extract_scripts, extract_styles};
 use wavecore_js::{eval_script, DomBridge, JsObject, JsValue, VM};
 use wavecore_layout::{LayoutBox, Rect};
@@ -17,6 +17,8 @@ struct BrowserState {
     vm: VM,
     bridge: DomBridge,
     focused_id: Option<String>,
+    focused_node_id: Option<NodeId>,
+    composition: String,
 }
 
 fn profile_root() -> PathBuf {
@@ -102,6 +104,8 @@ fn prepare_document(
         vm,
         bridge,
         focused_id: None,
+        focused_node_id: None,
+        composition: String::new(),
     };
 
     Ok((state, full_css))
@@ -238,63 +242,196 @@ fn main() {
                             println!("Navigating to: {resolved}");
                             needs_navigate = Some(resolved);
                         } else if let Some(control) = layout.find_form_control_at(x, y) {
-                            if let Some(fid) = &control.form_id {
-                                state.focused_id = Some(fid.clone());
-                                focused_rect = Some(control.rect);
-                                println!("Focused form control: #{}", fid);
+                            if let Some(node_id) = control.node_id {
+                                let fid = {
+                                    let mut dom = state.dom.borrow_mut();
+                                    dom.ensure_element_id(node_id, "_wc_focus_")
+                                };
+                                if let Some(fid) = fid {
+                                    state.focused_id = Some(fid.clone());
+                                    state.focused_node_id = Some(node_id);
+                                    state.composition.clear();
+                                    focused_rect = Some(control.rect);
+                                    println!("Focused form control: #{}", fid);
 
-                                // If button or submit, dispatch click event to Pulse JS
-                                if control.form_control_type.as_deref() == Some("button")
-                                    || control.form_control_type.as_deref() == Some("submit")
-                                {
-                                    state.bridge.dispatch_event(&mut state.vm, fid, "click");
-                                    needs_re_render = true;
-                                    full_repaint = true;
+                                    let control_type = control.form_control_type.as_deref().unwrap_or("");
+                                    if matches!(control_type, "checkbox" | "radio") {
+                                        let mut dom = state.dom.borrow_mut();
+                                        if let Some(node) = dom.find_by_node_id_mut(node_id) {
+                                            if let NodeType::Element(element) = &mut node.node_type {
+                                                if control_type == "checkbox" {
+                                                    element.set_checked(!element.is_checked());
+                                                } else {
+                                                    element.set_checked(true);
+                                                }
+                                            }
+                                        }
+                                        state.bridge.dispatch_event(&mut state.vm, &fid, "input");
+                                        state.bridge.dispatch_event(&mut state.vm, &fid, "change");
+                                        needs_re_render = true;
+                                        full_repaint = true;
+                                    } else if matches!(control_type, "button" | "submit") {
+                                        let prevented =
+                                            state.bridge.dispatch_event(&mut state.vm, &fid, "click");
+                                        if !prevented {
+                                            state.bridge.dispatch_event(&mut state.vm, &fid, "submit");
+                                        }
+                                        needs_re_render = true;
+                                        full_repaint = true;
+                                    } else {
+                                        state.bridge.dispatch_event(&mut state.vm, &fid, "focus");
+                                    }
                                 }
                             }
                         } else {
-                            state.focused_id = None;
+                            if let Some(fid) = state.focused_id.take() {
+                                state.bridge.dispatch_event(&mut state.vm, &fid, "blur");
+                            }
+                            state.focused_node_id = None;
+                            state.composition.clear();
                             focused_rect = None;
                         }
                     }
-                    WindowEvent::TextInput(ch) => {
-                        if let Some(fid) = &state.focused_id {
-                            let mut borrowed = state.dom.borrow_mut();
-                            if let Some(node) = borrowed.find_by_id_mut(fid) {
-                                if let wavecore_dom::NodeType::Element(e) = &mut node.node_type {
-                                    let mut current = e.value().unwrap_or("").to_string();
-                                    current.push(ch);
-                                    e.set_attribute("value", current);
-                                    needs_re_render = true;
-                                    if let Some(rect) = focused_rect {
-                                        damage_doc.push(rect);
-                                    } else {
-                                        full_repaint = true;
+                    WindowEvent::TextInput(text) => {
+                        if let (Some(fid), Some(node_id)) =
+                            (state.focused_id.clone(), state.focused_node_id)
+                        {
+                            let mut changed = false;
+                            {
+                                let mut borrowed = state.dom.borrow_mut();
+                                if let Some(node) = borrowed.find_by_node_id_mut(node_id) {
+                                    if let NodeType::Element(e) = &mut node.node_type {
+                                        let control_type = e.input_type().to_ascii_lowercase();
+                                        if !matches!(control_type.as_str(), "checkbox" | "radio" | "button" | "submit") {
+                                            let mut current = e.value().unwrap_or("").to_string();
+                                            current.push_str(&text);
+                                            e.set_attribute("value", current);
+                                            changed = true;
+                                        }
                                     }
+                                }
+                            }
+                            if changed {
+                                state.bridge.dispatch_event_with_data(
+                                    &mut state.vm,
+                                    &fid,
+                                    "input",
+                                    Some(&text),
+                                );
+                                needs_re_render = true;
+                                if let Some(rect) = focused_rect {
+                                    damage_doc.push(rect);
+                                } else {
+                                    full_repaint = true;
                                 }
                             }
                         }
                     }
-                    WindowEvent::Backspace => {
-                        if let Some(fid) = &state.focused_id {
-                            let mut borrowed = state.dom.borrow_mut();
-                            if let Some(node) = borrowed.find_by_id_mut(fid) {
-                                if let wavecore_dom::NodeType::Element(e) = &mut node.node_type {
-                                    let mut current = e.value().unwrap_or("").to_string();
-                                    current.pop();
-                                    e.set_attribute("value", current);
-                                    needs_re_render = true;
-                                    if let Some(rect) = focused_rect {
-                                        damage_doc.push(rect);
-                                    } else {
-                                        full_repaint = true;
+                    WindowEvent::CompositionStart => {
+                        state.composition.clear();
+                        if let Some(fid) = state.focused_id.clone() {
+                            state.bridge.dispatch_event(&mut state.vm, &fid, "compositionstart");
+                        }
+                    }
+                    WindowEvent::CompositionUpdate(text) => {
+                        state.composition = text.clone();
+                        if let Some(fid) = state.focused_id.clone() {
+                            state.bridge.dispatch_event_with_data(
+                                &mut state.vm,
+                                &fid,
+                                "compositionupdate",
+                                Some(&text),
+                            );
+                        }
+                    }
+                    WindowEvent::CompositionEnd(text) => {
+                        state.composition.clear();
+                        if let (Some(fid), Some(node_id)) =
+                            (state.focused_id.clone(), state.focused_node_id)
+                        {
+                            {
+                                let mut borrowed = state.dom.borrow_mut();
+                                if let Some(node) = borrowed.find_by_node_id_mut(node_id) {
+                                    if let NodeType::Element(e) = &mut node.node_type {
+                                        let mut current = e.value().unwrap_or("").to_string();
+                                        current.push_str(&text);
+                                        e.set_attribute("value", current);
                                     }
+                                }
+                            }
+                            state.bridge.dispatch_event_with_data(
+                                &mut state.vm,
+                                &fid,
+                                "compositionend",
+                                Some(&text),
+                            );
+                            state.bridge.dispatch_event_with_data(
+                                &mut state.vm,
+                                &fid,
+                                "input",
+                                Some(&text),
+                            );
+                            needs_re_render = true;
+                            full_repaint = true;
+                        }
+                    }
+                    WindowEvent::Backspace => {
+                        if let (Some(fid), Some(node_id)) =
+                            (state.focused_id.clone(), state.focused_node_id)
+                        {
+                            let mut changed = false;
+                            {
+                                let mut borrowed = state.dom.borrow_mut();
+                                if let Some(node) = borrowed.find_by_node_id_mut(node_id) {
+                                    if let NodeType::Element(e) = &mut node.node_type {
+                                        let mut current = e.value().unwrap_or("").to_string();
+                                        changed = current.pop().is_some();
+                                        e.set_attribute("value", current);
+                                    }
+                                }
+                            }
+                            if changed {
+                                state.bridge.dispatch_event(&mut state.vm, &fid, "input");
+                                needs_re_render = true;
+                                if let Some(rect) = focused_rect {
+                                    damage_doc.push(rect);
+                                } else {
+                                    full_repaint = true;
                                 }
                             }
                         } else if let Some(prev) = nav.go_back().map(str::to_string) {
                             println!("Navigating back to: {prev}");
                             needs_navigate = Some(prev);
                         }
+                    }
+                    WindowEvent::Enter => {
+                        if let Some(fid) = state.focused_id.clone() {
+                            state.bridge.dispatch_event(&mut state.vm, &fid, "change");
+                            let prevented =
+                                state.bridge.dispatch_event(&mut state.vm, &fid, "submit");
+                            if !prevented {
+                                if let Some(node_id) = state.focused_node_id {
+                                    let payload = {
+                                        let dom = state.dom.borrow();
+                                        dom.parent_of(node_id)
+                                            .filter(|parent| parent.tag_name() == Some("form"))
+                                            .map(|form| form.form_urlencoded())
+                                    };
+                                    if let Some(payload) = payload {
+                                        println!("[Form] submit: {}", payload);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    WindowEvent::Tab => {
+                        if let Some(fid) = state.focused_id.take() {
+                            state.bridge.dispatch_event(&mut state.vm, &fid, "change");
+                            state.bridge.dispatch_event(&mut state.vm, &fid, "blur");
+                        }
+                        state.focused_node_id = None;
+                        state.composition.clear();
+                        focused_rect = None;
                     }
                     WindowEvent::NavigateBack => {
                         if let Some(prev) = nav.go_back().map(str::to_string) {
@@ -330,6 +467,9 @@ fn main() {
                         state = ns;
                         full_css = nc;
                         focused_rect = None;
+                        state.focused_id = None;
+                        state.focused_node_id = None;
+                        state.composition.clear();
                         needs_re_render = true;
                         full_repaint = true;
                     }
