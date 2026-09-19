@@ -1,4 +1,5 @@
 use std::{env, fs, process};
+use wavecore_pixels::Surface;
 
 fn main() {
     let Some(path) = env::args().nth(1) else {
@@ -23,5 +24,11 @@ fn main() {
     let layout = wavecore_layout::layout(&styled, 800.0);
     let display_list = wavecore_render::build_display_list(&layout);
 
-    println!("{display_list:#?}");
+    let mut surface = Surface::new(800, 600);
+    surface.paint(&display_list);
+    fs::write("wavecore.ppm", surface.to_ppm()).unwrap_or_else(|e| {
+        eprintln!("wavecore: cannot write wavecore.ppm: {e}");
+        process::exit(1);
+    });
+    println!("WaveCore rendered {} display commands to wavecore.ppm", display_list.len());
 }
