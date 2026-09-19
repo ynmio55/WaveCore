@@ -371,28 +371,69 @@ impl Compiler {
                 self.chunk_mut().write_op(OpCode::Call(args.len()));
             }
             Expr::Binary { op, left, right } => {
-                self.compile_expr(left)?;
-                self.compile_expr(right)?;
                 match op {
-                    BinaryOp::Add => self.chunk_mut().write_op(OpCode::Add),
-                    BinaryOp::Sub => self.chunk_mut().write_op(OpCode::Sub),
-                    BinaryOp::Mul => self.chunk_mut().write_op(OpCode::Mul),
-                    BinaryOp::Div => self.chunk_mut().write_op(OpCode::Div),
-                    BinaryOp::Mod => self.chunk_mut().write_op(OpCode::Mod),
-                    BinaryOp::Equal => self.chunk_mut().write_op(OpCode::Equal),
-                    BinaryOp::NotEqual => self.chunk_mut().write_op(OpCode::NotEqual),
-                    BinaryOp::StrictEqual => self.chunk_mut().write_op(OpCode::StrictEqual),
-                    BinaryOp::StrictNotEqual => self.chunk_mut().write_op(OpCode::StrictNotEqual),
-                    BinaryOp::Greater => self.chunk_mut().write_op(OpCode::Greater),
-                    BinaryOp::GreaterEqual => self.chunk_mut().write_op(OpCode::GreaterEqual),
-                    BinaryOp::Less => self.chunk_mut().write_op(OpCode::Less),
-                    BinaryOp::LessEqual => self.chunk_mut().write_op(OpCode::LessEqual),
-                    BinaryOp::And => self.chunk_mut().write_op(OpCode::Equal),
-                    BinaryOp::Or => self.chunk_mut().write_op(OpCode::Equal),
-                    BinaryOp::InstanceOf | BinaryOp::In => {
-                        self.chunk_mut().write_op(OpCode::Equal)
+                    BinaryOp::And => {
+                        self.compile_expr(left)?;
+                        let end_jump = self.chunk_mut().write_op(OpCode::JumpIfFalse(0));
+                        self.chunk_mut().write_op(OpCode::Pop);
+                        self.compile_expr(right)?;
+                        let end = self.chunk_mut().code.len();
+                        self.chunk_mut().code[end_jump] = OpCode::JumpIfFalse(end);
                     }
-                };
+                    BinaryOp::Or => {
+                        self.compile_expr(left)?;
+                        let eval_right = self.chunk_mut().write_op(OpCode::JumpIfFalse(0));
+                        let end_jump = self.chunk_mut().write_op(OpCode::Jump(0));
+                        let right_start = self.chunk_mut().code.len();
+                        self.chunk_mut().code[eval_right] = OpCode::JumpIfFalse(right_start);
+                        self.chunk_mut().write_op(OpCode::Pop);
+                        self.compile_expr(right)?;
+                        let end = self.chunk_mut().code.len();
+                        self.chunk_mut().code[end_jump] = OpCode::Jump(end);
+                    }
+                    _ => {
+                        self.compile_expr(left)?;
+                        self.compile_expr(right)?;
+                        match op {
+                            BinaryOp::Add => self.chunk_mut().write_op(OpCode::Add),
+                            BinaryOp::Sub => self.chunk_mut().write_op(OpCode::Sub),
+                            BinaryOp::Mul => self.chunk_mut().write_op(OpCode::Mul),
+                            BinaryOp::Div => self.chunk_mut().write_op(OpCode::Div),
+                            BinaryOp::Mod => self.chunk_mut().write_op(OpCode::Mod),
+                            BinaryOp::Equal => self.chunk_mut().write_op(OpCode::Equal),
+                            BinaryOp::NotEqual => self.chunk_mut().write_op(OpCode::NotEqual),
+                            BinaryOp::StrictEqual => self.chunk_mut().write_op(OpCode::StrictEqual),
+                            BinaryOp::StrictNotEqual => self.chunk_mut().write_op(OpCode::StrictNotEqual),
+                            BinaryOp::Greater => self.chunk_mut().write_op(OpCode::Greater),
+                            BinaryOp::GreaterEqual => self.chunk_mut().write_op(OpCode::GreaterEqual),
+                            BinaryOp::Less => self.chunk_mut().write_op(OpCode::Less),
+                            BinaryOp::LessEqual => self.chunk_mut().write_op(OpCode::LessEqual),
+                            BinaryOp::InstanceOf | BinaryOp::In => {
+                                self.chunk_mut().write_op(OpCode::Equal)
+                            }
+                            BinaryOp::And | BinaryOp::Or => unreachable!(),
+                        };
+                    }
+                }
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.compile_expr(condition)?;
+                let else_jump = self.chunk_mut().write_op(OpCode::JumpIfFalse(0));
+                self.chunk_mut().write_op(OpCode::Pop);
+                self.compile_expr(then_expr)?;
+                let end_jump = self.chunk_mut().write_op(OpCode::Jump(0));
+
+                let else_start = self.chunk_mut().code.len();
+                self.chunk_mut().code[else_jump] = OpCode::JumpIfFalse(else_start);
+                self.chunk_mut().write_op(OpCode::Pop);
+                self.compile_expr(else_expr)?;
+
+                let end = self.chunk_mut().code.len();
+                self.chunk_mut().code[end_jump] = OpCode::Jump(end);
             }
             Expr::Unary { op, expr } => {
                 self.compile_expr(expr)?;
