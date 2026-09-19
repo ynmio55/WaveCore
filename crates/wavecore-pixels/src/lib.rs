@@ -78,7 +78,41 @@ impl Surface {
     }
 
     pub fn mark_damage(&mut self, rect: Rect) {
-        self.damage_rects.push(rect);
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+
+        // Coalesce overlapping/touching regions so the compositor does less work.
+        let mut merged = rect;
+        let mut i = 0;
+        while i < self.damage_rects.len() {
+            let existing = self.damage_rects[i];
+            if rects_touch_or_overlap(&merged, &existing) {
+                merged = union_rect(&merged, &existing);
+                self.damage_rects.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        self.damage_rects.push(merged);
+    }
+
+    pub fn normalized_damage(&self) -> Vec<Rect> {
+        let mut out: Vec<Rect> = Vec::new();
+        for rect in &self.damage_rects {
+            let mut merged = *rect;
+            let mut i = 0;
+            while i < out.len() {
+                if rects_touch_or_overlap(&merged, &out[i]) {
+                    merged = union_rect(&merged, &out[i]);
+                    out.swap_remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(merged);
+        }
+        out
     }
 
     pub fn paint(&mut self, list: &[DisplayCommand]) {
@@ -433,6 +467,27 @@ impl Surface {
     }
 }
 
+
+fn rects_touch_or_overlap(a: &Rect, b: &Rect) -> bool {
+    a.x <= b.x + b.width
+        && a.x + a.width >= b.x
+        && a.y <= b.y + b.height
+        && a.y + a.height >= b.y
+}
+
+fn union_rect(a: &Rect, b: &Rect) -> Rect {
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = (a.x + a.width).max(b.x + b.width);
+    let y1 = (a.y + a.height).max(b.y + b.height);
+    Rect {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    }
+}
+
 fn parse_color(s: &str) -> Option<Rgba> {
     let s = s.trim().to_ascii_lowercase();
     match s.as_str() {
@@ -567,4 +622,16 @@ mod tests {
         // Outside circle should be white
         assert_eq!(surface.pixels[90 * 100 + 90], Rgba(255, 255, 255, 255));
     }
+    #[test]
+    fn damage_regions_are_coalesced() {
+        let mut surface = Surface::new(100, 100);
+        surface.mark_damage(Rect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 });
+        surface.mark_damage(Rect { x: 20.0, y: 0.0, width: 10.0, height: 20.0 });
+        surface.mark_damage(Rect { x: 80.0, y: 80.0, width: 10.0, height: 10.0 });
+
+        let damage = surface.normalized_damage();
+        assert_eq!(damage.len(), 2);
+        assert!(damage.iter().any(|r| r.x == 0.0 && r.width == 30.0));
+    }
+
 }
