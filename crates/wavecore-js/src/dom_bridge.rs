@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -109,6 +109,47 @@ impl DomBridge {
                 } else {
                     Ok(JsValue::Null)
                 }
+            }),
+        );
+
+        // document.querySelectorAll(selector)
+        let r_all = root_ref.clone();
+        let l_all = listeners_ref.clone();
+        document.set(
+            "querySelectorAll",
+            JsValue::native("querySelectorAll", move |_vm, args| {
+                let sel = args.first().map(|a| a.to_js_string()).unwrap_or_default();
+                let ids = r_all.borrow().query_selector_all_ids(&sel);
+                let mut wrapped = Vec::with_capacity(ids.len());
+
+                for node_id in ids {
+                    let html_id = {
+                        let mut root = r_all.borrow_mut();
+                        let Some(node) = root.find_by_node_id_mut(node_id) else {
+                            continue;
+                        };
+                        let wavecore_dom::NodeType::Element(element) = &mut node.node_type else {
+                            continue;
+                        };
+                        if let Some(existing) = element.id() {
+                            existing.to_string()
+                        } else {
+                            let generated = format!(
+                                "_wc_auto_{}",
+                                ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+                            );
+                            element.set_attribute("id", &generated);
+                            generated
+                        }
+                    };
+                    wrapped.push(create_element_wrapper(
+                        &html_id,
+                        r_all.clone(),
+                        l_all.clone(),
+                    ));
+                }
+
+                Ok(JsValue::new_array(wrapped))
             }),
         );
 
@@ -310,17 +351,72 @@ impl DomBridge {
         count
     }
 
-    pub fn dispatch_event(&self, vm: &mut VM, target_id: &str, event_name: &str) {
-        let callbacks = {
-            let map = self.listeners.borrow();
-            map.get(&(target_id.to_string(), event_name.to_string())).cloned()
+    pub fn dispatch_event(&self, vm: &mut VM, target_id: &str, event_name: &str) -> bool {
+        self.dispatch_event_bubbling(vm, target_id, event_name)
+    }
+
+    pub fn dispatch_event_bubbling(
+        &self,
+        vm: &mut VM,
+        target_id: &str,
+        event_name: &str,
+    ) -> bool {
+        let path_ids = {
+            let root = self.root.borrow();
+            let Some(target) = root.find_by_id(target_id) else {
+                return false;
+            };
+            root.ancestor_ids_for(target.node_id()).unwrap_or_default()
         };
 
-        if let Some(cb_list) = callbacks {
-            for cb in cb_list {
-                let _ = vm.call_function(&cb, &[]);
+        let default_prevented = Rc::new(Cell::new(false));
+
+        for node_id in path_ids.into_iter().rev() {
+            let current_id = {
+                let root = self.root.borrow();
+                root.find_by_node_id(node_id)
+                    .and_then(|node| match &node.node_type {
+                        wavecore_dom::NodeType::Element(element) => {
+                            element.id().map(str::to_string)
+                        }
+                        _ => None,
+                    })
+            };
+            let Some(current_id) = current_id else {
+                continue;
+            };
+
+            let callbacks = {
+                let map = self.listeners.borrow();
+                map.get(&(current_id.clone(), event_name.to_string()))
+                    .cloned()
+                    .unwrap_or_default()
+            };
+
+            for callback in callbacks {
+                let mut event = JsObject::new();
+                event.set("type", JsValue::String(event_name.to_string()));
+                event.set("targetId", JsValue::String(target_id.to_string()));
+                event.set("currentTargetId", JsValue::String(current_id.clone()));
+                event.set("bubbles", JsValue::Boolean(true));
+
+                let prevented = default_prevented.clone();
+                event.set(
+                    "preventDefault",
+                    JsValue::native("preventDefault", move |_vm, _args| {
+                        prevented.set(true);
+                        Ok(JsValue::Undefined)
+                    }),
+                );
+
+                let _ = vm.call_function(
+                    &callback,
+                    &[JsValue::Object(Rc::new(RefCell::new(event)))],
+                );
             }
         }
+
+        default_prevented.get()
     }
 }
 
@@ -431,6 +527,12 @@ fn create_element_wrapper(
     let elem_id = id.to_string();
 
     elem_obj.set("id", JsValue::String(elem_id.clone()));
+    let internal_node_id = root
+        .borrow()
+        .find_by_id(&elem_id)
+        .map(|node| node.node_id().0)
+        .unwrap_or(0);
+    elem_obj.set("nodeId", JsValue::Number(internal_node_id as f64));
 
     // tagName
     let r_tag = root.clone();
@@ -600,25 +702,39 @@ fn create_element_wrapper(
     );
     elem_obj.set("classList", JsValue::Object(Rc::new(RefCell::new(class_list))));
 
-    // appendChild(child)
+    // appendChild(child): re-parent the existing node instead of cloning it.
     let r_append = root.clone();
     let id_append = elem_id.clone();
     elem_obj.set(
         "appendChild",
         JsValue::native("appendChild", move |_vm, args| {
-            if let Some(child_val) = args.first() {
-                if let JsValue::Object(child_obj) = child_val {
-                    let child_id = child_obj.borrow().get("id").to_js_string();
-                    if !child_id.is_empty() {
-                        let mut borrowed = r_append.borrow_mut();
-                        // Find and clone or re-parent child node
-                        if let Some(child_node) = borrowed.find_by_id(&child_id).cloned() {
+            if let Some(JsValue::Object(child_obj)) = args.first() {
+                let child_id = child_obj.borrow().get("id").to_js_string();
+                if !child_id.is_empty() && child_id != id_append {
+                    let mut borrowed = r_append.borrow_mut();
+                    let child_node_id = borrowed.find_by_id(&child_id).map(|node| node.node_id());
+                    if let Some(child_node_id) = child_node_id {
+                        if let Some(child_node) = borrowed.detach_by_id(child_node_id) {
                             if let Some(parent_node) = borrowed.find_by_id_mut(&id_append) {
                                 parent_node.append_child(child_node);
                             }
                         }
                     }
                 }
+            }
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    // remove()
+    let r_remove = root.clone();
+    let id_remove = elem_id.clone();
+    elem_obj.set(
+        "remove",
+        JsValue::native("remove", move |_vm, _args| {
+            let mut borrowed = r_remove.borrow_mut();
+            if let Some(node_id) = borrowed.find_by_id(&id_remove).map(|node| node.node_id()) {
+                let _ = borrowed.detach_by_id(node_id);
             }
             Ok(JsValue::Undefined)
         }),
