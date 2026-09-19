@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
+fontdb = "0.23"
+rustybuzz = "0.20"
+ttf-parser = "0.25"
