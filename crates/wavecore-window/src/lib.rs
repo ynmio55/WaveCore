@@ -1,4 +1,5 @@
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
+use std::collections::VecDeque;
 use wavecore_layout::Rect;
 use wavecore_pixels::Surface;
 
@@ -6,9 +7,13 @@ use wavecore_pixels::Surface;
 pub enum WindowEvent {
     None,
     Click { x: f32, y: f32 },
-    TextInput(char),
+    TextInput(String),
+    CompositionStart,
+    CompositionUpdate(String),
+    CompositionEnd(String),
     Backspace,
     Enter,
+    Tab,
     NavigateBack,
     NavigateForward,
     Reload,
@@ -22,6 +27,7 @@ pub struct BrowserWindow {
     pub scroll_y: f32,
     pub back_buffer: Vec<u32>,
     mouse_was_down: bool,
+    injected_events: VecDeque<WindowEvent>,
 }
 
 impl BrowserWindow {
@@ -43,6 +49,7 @@ impl BrowserWindow {
             scroll_y: 0.0,
             back_buffer: vec![0; width * height],
             mouse_was_down: false,
+            injected_events: VecDeque::new(),
         })
     }
 
@@ -60,7 +67,7 @@ impl BrowserWindow {
     }
 
     pub fn poll_events(&mut self) -> Vec<WindowEvent> {
-        let mut events = Vec::new();
+        let mut events: Vec<WindowEvent> = self.injected_events.drain(..).collect();
 
         // Detect single mouse click (mouse down transition)
         let mouse_down = self.window.get_mouse_down(MouseButton::Left);
@@ -98,11 +105,14 @@ impl BrowserWindow {
         if self.window.is_key_pressed(Key::Enter, KeyRepeat::No) {
             events.push(WindowEvent::Enter);
         }
+        if self.window.is_key_pressed(Key::Tab, KeyRepeat::No) {
+            events.push(WindowEvent::Tab);
+        }
 
         // Text typing keys
         for key in self.window.get_keys_pressed(KeyRepeat::Yes) {
             if let Some(ch) = key_to_char(key, shift) {
-                events.push(WindowEvent::TextInput(ch));
+                events.push(WindowEvent::TextInput(ch.to_string()));
             }
         }
 
@@ -133,6 +143,30 @@ impl BrowserWindow {
         }
 
         events
+    }
+
+    /// Inject committed Unicode text from a platform text-input backend.
+    /// This is the path used by IME-capable integrations (Wayland/X11/Windows)
+    /// instead of synthesizing characters from physical key codes.
+    pub fn queue_text_input(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if !text.is_empty() {
+            self.injected_events.push_back(WindowEvent::TextInput(text));
+        }
+    }
+
+    pub fn queue_composition_start(&mut self) {
+        self.injected_events.push_back(WindowEvent::CompositionStart);
+    }
+
+    pub fn queue_composition_update(&mut self, text: impl Into<String>) {
+        self.injected_events
+            .push_back(WindowEvent::CompositionUpdate(text.into()));
+    }
+
+    pub fn queue_composition_end(&mut self, text: impl Into<String>) {
+        self.injected_events
+            .push_back(WindowEvent::CompositionEnd(text.into()));
     }
 
     /// Process mouse scroll wheel, update scroll_y, and return current scroll offset
