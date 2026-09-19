@@ -11,3 +11,4 @@ wavecore-layout = { path = "../wavecore-layout" }
 wavecore-render = { path = "../wavecore-render" }
 wavecore-pixels = { path = "../wavecore-pixels" }
 wavecore-window = { path = "../wavecore-window" }
+wavecore-net = { path = "../wavecore-net" }

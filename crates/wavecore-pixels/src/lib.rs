@@ -77,6 +77,48 @@ impl Surface {
                     let c = parse_color(color).unwrap_or(Rgba(30, 30, 30, 255));
                     self.draw_text(text, rect.x + offset_x, rect.y + offset_y, *font_size, *line_height, rect.width, c);
                 }
+                DisplayCommand::Image { rect, src } => {
+                    self.draw_image(src, rect.x + offset_x, rect.y + offset_y, rect.width, rect.height);
+                }
+            }
+        }
+    }
+
+    pub fn draw_image(&mut self, src: &str, x: f32, y: f32, width: f32, height: f32) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+
+        let bytes = match std::fs::read(src) {
+            Ok(b) => b,
+            Err(_) => {
+                // Fallback placeholder box
+                self.fill_rect(x, y, width, height, Rgba(235, 238, 242, 255));
+                return;
+            }
+        };
+
+        let Ok(img) = image::load_from_memory(&bytes) else {
+            self.fill_rect(x, y, width, height, Rgba(235, 238, 242, 255));
+            return;
+        };
+
+        let rgba_img = img.to_rgba8();
+        let orig_w = rgba_img.width() as f32;
+        let orig_h = rgba_img.height() as f32;
+        let scale_x = orig_w / width;
+        let scale_y = orig_h / height;
+
+        let target_w = width as u32;
+        let target_h = height as u32;
+
+        for dy in 0..target_h {
+            let sy = ((dy as f32 * scale_y) as u32).min(rgba_img.height() - 1);
+            for dx in 0..target_w {
+                let sx = ((dx as f32 * scale_x) as u32).min(rgba_img.width() - 1);
+                let pixel = rgba_img.get_pixel(sx, sy);
+                let color = Rgba(pixel[0], pixel[1], pixel[2], pixel[3]);
+                self.blend_pixel((x + dx as f32) as i32, (y + dy as f32) as i32, color, pixel[3]);
             }
         }
     }

@@ -26,7 +26,10 @@ impl<'a> Parser<'a> {
                 let children=if self_closing||is_void {vec![]} else {self.parse_nodes(Some(&tag))};
                 nodes.push(Node::element_with_attributes(tag,attrs,children));
             } else {
-                let text=self.consume_until('<'); if !text.is_empty(){nodes.push(Node::text(text));}
+                let text=self.consume_until('<');
+                if !text.is_empty(){
+                    nodes.push(Node::text(decode_entities(&text)));
+                }
             }
         } nodes
     }
@@ -50,12 +53,125 @@ fn parse_start_tag(raw:&str)->(String,BTreeMap<String,String>){
         if !name.is_empty(){attrs.insert(name,value);}
     } (tag,attrs)
 }
+pub fn decode_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            let mut entity = String::new();
+            let mut found_semi = false;
+            while let Some(&next_c) = chars.peek() {
+                if next_c == ';' {
+                    chars.next();
+                    found_semi = true;
+                    break;
+                } else if next_c.is_alphanumeric() || next_c == '#' {
+                    entity.push(chars.next().unwrap());
+                    if entity.len() > 10 { break; }
+                } else {
+                    break;
+                }
+            }
+            if found_semi {
+                match entity.as_str() {
+                    "amp" => out.push('&'),
+                    "lt" => out.push('<'),
+                    "gt" => out.push('>'),
+                    "quot" => out.push('"'),
+                    "apos" => out.push('\''),
+                    "nbsp" => out.push(' '),
+                    "bull" => out.push('•'),
+                    "copy" => out.push('©'),
+                    "reg" => out.push('®'),
+                    "trade" => out.push('™'),
+                    "mdash" => out.push('—'),
+                    "ndash" => out.push('–'),
+                    s if s.starts_with("#x") || s.starts_with("#X") => {
+                        if let Ok(val) = u32::from_str_radix(&s[2..], 16) {
+                            if let Some(ch) = char::from_u32(val) {
+                                out.push(ch);
+                            } else {
+                                out.push('&'); out.push_str(&entity); out.push(';');
+                            }
+                        } else {
+                            out.push('&'); out.push_str(&entity); out.push(';');
+                        }
+                    }
+                    s if s.starts_with('#') => {
+                        if let Ok(val) = s[1..].parse::<u32>() {
+                            if let Some(ch) = char::from_u32(val) {
+                                out.push(ch);
+                            } else {
+                                out.push('&'); out.push_str(&entity); out.push(';');
+                            }
+                        } else {
+                            out.push('&'); out.push_str(&entity); out.push(';');
+                        }
+                    }
+                    _ => {
+                        out.push('&');
+                        out.push_str(&entity);
+                        out.push(';');
+                    }
+                }
+            } else {
+                out.push('&');
+                out.push_str(&entity);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+pub fn extract_styles(node: &Node) -> String {
+    let mut s = String::new();
+    walk_styles(node, &mut s);
+    s
+}
+
+fn walk_styles(node: &Node, out: &mut String) {
+    if let wavecore_dom::NodeType::Element(e) = &node.node_type {
+        if e.tag_name.eq_ignore_ascii_case("style") {
+            for child in &node.children {
+                if let wavecore_dom::NodeType::Text(text) = &child.node_type {
+                    out.push_str(text);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    for child in &node.children {
+        walk_styles(child, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
- use super::*; use wavecore_dom::NodeType;
- #[test] fn parses_document_attributes_void_and_comments(){
-  let dom=parse("<!doctype html><!--x--><main id=\"app\" class=\"page hero\"><img src=\"a.png\"><p>Hello</p></main>");
-  assert_eq!(dom.children.len(),1); let NodeType::Element(main)=&dom.children[0].node_type else{panic!()};
-  assert_eq!(main.tag_name,"main"); assert_eq!(main.id(),Some("app")); assert!(main.has_class("hero")); assert_eq!(dom.children[0].children.len(),2);
- }
+    use super::*;
+    use wavecore_dom::NodeType;
+
+    #[test]
+    fn parses_document_attributes_void_and_comments() {
+        let dom = parse("<!doctype html><!--x--><main id=\"app\" class=\"page hero\"><img src=\"a.png\"><p>Hello &bull; &copy; 2026</p></main>");
+        assert_eq!(dom.children.len(), 1);
+        let NodeType::Element(main) = &dom.children[0].node_type else { panic!() };
+        assert_eq!(main.tag_name, "main");
+        assert_eq!(main.id(), Some("app"));
+        assert!(main.has_class("hero"));
+        assert_eq!(dom.children[0].children.len(), 2);
+
+        let NodeType::Element(p) = &dom.children[0].children[1].node_type else { panic!() };
+        assert_eq!(p.tag_name, "p");
+        let NodeType::Text(text) = &dom.children[0].children[1].children[0].node_type else { panic!() };
+        assert_eq!(text, "Hello • © 2026");
+    }
+
+    #[test]
+    fn extracts_embedded_style_tags() {
+        let dom = parse("<html><head><style>body { color: red; }</style></head><body><h1>Hi</h1></body></html>");
+        let css = extract_styles(&dom);
+        assert!(css.contains("color: red"));
+    }
 }

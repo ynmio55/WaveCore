@@ -5,6 +5,7 @@ pub enum DisplayCommand {
     FillRect { rect: Rect, color: String },
     Border { rect: Rect, widths: Edges, color: String },
     Text { text: String, rect: Rect, font_size: f32, line_height: f32, color: String },
+    Image { rect: Rect, src: String },
 }
 
 pub fn build_display_list(layout: &LayoutBox) -> Vec<DisplayCommand> {
@@ -22,6 +23,12 @@ fn walk(b: &LayoutBox, v: &mut Vec<DisplayCommand>) {
             rect: b.rect,
             widths: b.border,
             color: b.border_color.clone().unwrap_or_else(|| "#000000".into()),
+        });
+    }
+    if let Some(src) = &b.image_src {
+        v.push(DisplayCommand::Image {
+            rect: b.content,
+            src: src.clone(),
         });
     }
     if b.text.is_some() {

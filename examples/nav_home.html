@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    html, body {
+      background-color: #0d1117;
+      color: #c9d1d9;
+      font-family: Sarabun, sans-serif;
+      margin: 0px;
+      padding: 16px;
+    }
+    .header {
+      background-color: #161b22;
+      border: 2px solid #30363d;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    h1 {
+      color: #58a6ff;
+      margin: 0px;
+    }
+    .card {
+      background-color: #21262d;
+      border: 1px solid #30363d;
+      padding: 14px;
+      margin-bottom: 16px;
+    }
+    .thai-showcase {
+      background-color: #1c2128;
+      border: 1px solid #388bfd;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    .button-link {
+      background-color: #238636;
+      color: #ffffff;
+      padding: 8px 16px;
+      border: 1px solid #2ea043;
+    }
+    .badge {
+      background-color: #1f6feb;
+      color: #ffffff;
+      padding: 4px 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="examples/logo.png" width="64" height="64">
+    <h1>WaveCore Browser Engine (Stages 1&ndash;10 Complete)</h1>
+    <p style="color: #8b949e; margin-top: 6px;">เครื่องยนต์เว็บเบราว์เซอร์สถาปัตยกรรมโมเดิร์น เขียนด้วยภาษา Rust 100%</p>
+  </div>
+
+  <div class="thai-showcase">
+    <h2 style="color: #7ee787; margin-top: 0px;">การทดสอบภาษาไทยระดับสมบูรณ์ 100% (HarfBuzz OpenType Shaping)</h2>
+    <p>การจัดวางวรรณยุกต์และสระภาษาไทยลอยถูกต้องตามหลักอักขรวิธี เช่น <strong>ที่ นี่ ปี่ ป้า กิ๊ก กุ้ง นํ้าพริก ผัดไทย ปลากระพงทอด</strong></p>
+    <p>ทดสอบวรรณยุกต์ซ้อนสระบนและล่าง: <em>ญี่ ปู่ ฟื้น มนุษย์ ปฏิทิน คริปโทเคอร์เรนซี ฐิติ</em></p>
+    <p>ทดสอบวรรณยุกต์กับพยัญชนะหางยาว: <strong>ป่า ป้า ป๊า ป๋า ฝ่า ฝรั่ง ฟ้า ฟ้อง</strong> &mdash; สระและวรรณยุกต์หลบหางพยัญชนะอย่างถูกต้องสวยงาม</p>
+  </div>
+
+  <div class="card">
+    <h3 style="color: #58a6ff; margin-top: 0px;">สถานะการพัฒนาระยะที่ 1 ถึง 10 (Roadmap Stages 1-10)</h3>
+    <p>&bull; <strong>1. DOM + HTML:</strong> Parser พร้อม Entity decoding (&copy; &bull; &amp;) &amp; Void tags</p>
+    <p>&bull; <strong>2. CSS Parser:</strong> Specificity cascade, Tag, Class, ID, Selector commas &amp; Inline styles</p>
+    <p>&bull; <strong>3. CSS Box Model:</strong> Margin, Padding, Border, Width/Height, Auto-flow</p>
+    <p>&bull; <strong>4. Text Engine:</strong> HarfBuzz OpenType shaping, Tone mark lifting &amp; Emoji 🚀🌊✨</p>
+    <p>&bull; <strong>5. Renderer:</strong> Anti-aliased text rendering, Border boxes, Color fills, Image blitting</p>
+    <p>&bull; <strong>6. Window/Compositor:</strong> Real-time 60 FPS viewport window, scrolling, and resize</p>
+    <p>&bull; <strong>7. Networking:</strong> HTTP/HTTPS client (TLS, redirects, gzip) via wavecore-net</p>
+    <p>&bull; <strong>8. Navigation:</strong> History stack, Back/Forward/Reload, URL resolution</p>
+    <p>&bull; <strong>9. Images:</strong> PNG/JPEG/WebP/GIF decoding &amp; alpha blending</p>
+    <p>&bull; <strong>10. Input:</strong> Mouse click hit-testing on links, keyboard navigation shortcuts, mouse wheel scrolling</p>
+  </div>
+
+  <div class="card" style="border: 1px solid #238636;">
+    <h3 style="color: #3fb950; margin-top: 0px;">ทดสอบระบบ Navigation และการคลิกลิงก์</h3>
+    <p>ลองคลิกที่ปุ่มลิงก์ด้านล่างเพื่อเปลี่ยนหน้าไปยังหน้า About:</p>
+    <p style="margin-top: 14px;">
+      <a href="examples/nav_about.html" class="button-link">คลิกที่นี่เพื่อไปหน้า About &rarr;</a>
+    </p>
+  </div>
+
+  <div style="margin-top: 24px; color: #8b949e; text-align: center;">
+    <p>WaveCore Engine &copy; 2026 &mdash; กด Backspace หรือ Alt+Left เพื่อย้อนกลับ | กด F5 เพื่อรีโหลด</p>
+  </div>
+</body>
+</html>

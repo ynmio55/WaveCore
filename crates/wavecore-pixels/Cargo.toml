@@ -8,3 +8,4 @@ wavecore-render = { path = "../wavecore-render" }
 wavecore-text = { path = "../wavecore-text" }
 fontdue = "0.9"
 rustybuzz = "0.20"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
