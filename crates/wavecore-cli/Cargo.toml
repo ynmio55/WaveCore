@@ -10,5 +10,8 @@ wavecore-style = { path = "../wavecore-style" }
 wavecore-layout = { path = "../wavecore-layout" }
 wavecore-render = { path = "../wavecore-render" }
 wavecore-pixels = { path = "../wavecore-pixels" }
+wavecore-dom = { path = "../wavecore-dom" }
 wavecore-window = { path = "../wavecore-window" }
 wavecore-net = { path = "../wavecore-net" }
+wavecore-js = { path = "../wavecore-js" }
+wavecore-storage = { path = "../wavecore-storage" }

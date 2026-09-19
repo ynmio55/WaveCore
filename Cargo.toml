@@ -10,6 +10,8 @@ members = [
   "crates/wavecore-pixels",
   "crates/wavecore-window",
   "crates/wavecore-net",
+  "crates/wavecore-js",
+  "crates/wavecore-storage",
   "crates/wavecore-cli",
 ]
 resolver = "2"

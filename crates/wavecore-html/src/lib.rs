@@ -22,9 +22,28 @@ impl<'a> Parser<'a> {
                 let self_closing=raw.trim_end().ends_with('/');
                 let (tag,attrs)=parse_start_tag(raw.trim_end_matches('/').trim());
                 if tag.is_empty(){continue}
-                let is_void=matches!(tag.as_str(),"area"|"base"|"br"|"col"|"embed"|"hr"|"img"|"input"|"link"|"meta"|"source"|"track"|"wbr");
-                let children=if self_closing||is_void {vec![]} else {self.parse_nodes(Some(&tag))};
-                nodes.push(Node::element_with_attributes(tag,attrs,children));
+                let is_void = matches!(tag.as_str(), "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input" | "link" | "meta" | "source" | "track" | "wbr");
+                let children = if self_closing || is_void {
+                    vec![]
+                } else if tag == "script" || tag == "style" {
+                    let close_pattern = format!("</{}", tag);
+                    let start = self.pos;
+                    let lower = self.input[self.pos..].to_ascii_lowercase();
+                    let raw_content = if let Some(idx) = lower.find(&close_pattern) {
+                        let content = self.input[start..start + idx].to_string();
+                        self.pos = start + idx;
+                        self.consume_through(">");
+                        content
+                    } else {
+                        let content = self.input[start..].to_string();
+                        self.pos = self.input.len();
+                        content
+                    };
+                    vec![Node::text(raw_content)]
+                } else {
+                    self.parse_nodes(Some(&tag))
+                };
+                nodes.push(Node::element_with_attributes(tag, attrs, children));
             } else {
                 let text=self.consume_until('<');
                 if !text.is_empty(){
@@ -147,6 +166,33 @@ fn walk_styles(node: &Node, out: &mut String) {
     }
 }
 
+pub fn extract_scripts(node: &Node) -> Vec<String> {
+    let mut v = Vec::new();
+    walk_scripts(node, &mut v);
+    v
+}
+
+fn walk_scripts(node: &Node, out: &mut Vec<String>) {
+    if let wavecore_dom::NodeType::Element(e) = &node.node_type {
+        if e.tag_name.eq_ignore_ascii_case("script") {
+            let mut script_body = String::new();
+            for child in &node.children {
+                if let wavecore_dom::NodeType::Text(text) = &child.node_type {
+                    script_body.push_str(text);
+                    script_body.push('\n');
+                }
+            }
+            let trimmed = script_body.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    for child in &node.children {
+        walk_scripts(child, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +219,14 @@ mod tests {
         let dom = parse("<html><head><style>body { color: red; }</style></head><body><h1>Hi</h1></body></html>");
         let css = extract_styles(&dom);
         assert!(css.contains("color: red"));
+    }
+
+    #[test]
+    fn extracts_script_tags() {
+        let dom = parse("<html><head><script>let x = 10;</script></head><body><script>console.log('hi');</script></body></html>");
+        let scripts = extract_scripts(&dom);
+        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts[0], "let x = 10;");
+        assert_eq!(scripts[1], "console.log('hi');");
     }
 }

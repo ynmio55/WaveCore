@@ -1227,11 +1227,14 @@ name = "wavecore"
 version = "0.1.0"
 dependencies = [
  "wavecore-css",
+ "wavecore-dom",
  "wavecore-html",
+ "wavecore-js",
  "wavecore-layout",
  "wavecore-net",
  "wavecore-pixels",
  "wavecore-render",
+ "wavecore-storage",
  "wavecore-style",
  "wavecore-window",
 ]
@@ -1249,6 +1252,14 @@ name = "wavecore-html"
 version = "0.1.0"
 dependencies = [
  "wavecore-dom",
+]
+
+[[package]]
+name = "wavecore-js"
+version = "0.1.0"
+dependencies = [
+ "wavecore-dom",
+ "wavecore-net",
 ]
 
 [[package]]
@@ -1285,6 +1296,13 @@ name = "wavecore-render"
 version = "0.1.0"
 dependencies = [
  "wavecore-layout",
+]
+
+[[package]]
+name = "wavecore-storage"
+version = "0.1.0"
+dependencies = [
+ "url",
 ]
 
 [[package]]

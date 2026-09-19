@@ -44,6 +44,10 @@ pub struct LayoutBox {
     pub text_lines: Vec<String>,
     pub image_src: Option<String>,
     pub link_url: Option<String>,
+    pub is_form_control: bool,
+    pub form_id: Option<String>,
+    pub form_control_type: Option<String>,
+    pub placeholder: Option<String>,
     pub children: Vec<LayoutBox>,
 }
 
@@ -63,6 +67,15 @@ impl LayoutBox {
     pub fn find_link_at(&self, px: f32, py: f32) -> Option<String> {
         let b = self.hit_test(px, py)?;
         b.link_url.clone()
+    }
+
+    pub fn find_form_control_at(&self, px: f32, py: f32) -> Option<&LayoutBox> {
+        let b = self.hit_test(px, py)?;
+        if b.is_form_control {
+            Some(b)
+        } else {
+            None
+        }
     }
 }
 
@@ -183,6 +196,10 @@ fn layout_at(
             text_lines: vec![],
             image_src: None,
             link_url: None,
+            is_form_control: false,
+            form_id: None,
+            form_control_type: None,
+            placeholder: None,
             children: vec![],
         };
     }
@@ -190,14 +207,19 @@ fn layout_at(
     let fs = font_size(node, inherited_font);
     let current_color = node.properties.get("color").cloned().or(inherited_color);
 
-    let (link_url, image_src, is_img) = match &node.node.node_type {
+    let (link_url, image_src, is_img, is_form_control, form_id, form_control_type, placeholder, form_val) = match &node.node.node_type {
         NodeType::Element(e) => {
             let l = e.attributes.get("href").cloned().or(inherited_link.clone());
             let img = e.tag_name.eq_ignore_ascii_case("img");
             let src = if img { e.attributes.get("src").cloned() } else { None };
-            (l, src, img)
+            let is_form = e.is_form_control();
+            let fid = e.id().map(String::from);
+            let ftype = Some(e.tag_name.clone());
+            let ph = e.placeholder().map(String::from);
+            let val = e.value().map(String::from);
+            (l, src, img, is_form, fid, ftype, ph, val)
         }
-        _ => (inherited_link.clone(), None, false),
+        _ => (inherited_link.clone(), None, false, false, None, None, None, None),
     };
 
     if let NodeType::Text(text) = &node.node.node_type {
@@ -224,12 +246,16 @@ fn layout_at(
             text_lines: metrics.lines.into_iter().map(|l| l.text).collect(),
             image_src: None,
             link_url,
+            is_form_control: false,
+            form_id: None,
+            form_control_type: None,
+            placeholder: None,
             children: vec![],
         };
     }
 
     let margin = edges(node, "margin", available);
-    let padding = edges(node, "padding", available);
+    let mut padding = edges(node, "padding", available);
     let mut border = edges(node, "border-width", available);
     if border == Edges::default() {
         if let Some(first) = node
@@ -248,6 +274,16 @@ fn layout_at(
         }
     }
 
+    // Default form control styling if not set by CSS
+    if is_form_control {
+        if border == Edges::default() {
+            border = Edges { top: 1.0, right: 1.0, bottom: 1.0, left: 1.0 };
+        }
+        if padding == Edges::default() {
+            padding = Edges { top: 6.0, right: 12.0, bottom: 6.0, left: 12.0 };
+        }
+    }
+
     let sizing = if node
         .properties
         .get("box-sizing")
@@ -261,7 +297,11 @@ fn layout_at(
     let noncontent = padding.left + padding.right + border.left + border.right;
     let usable = (available - margin.left - margin.right).max(0.0);
 
-    // Check width from CSS or HTML attribute
+    let display_mode = node.properties.get("display").map(|s| s.trim()).unwrap_or("block");
+    let is_flex = display_mode == "flex";
+    let is_grid = display_mode == "grid";
+
+    // Width calculation
     let attr_w = match &node.node.node_type {
         NodeType::Element(e) => e.attributes.get("width").and_then(|v| length(Some(v), available)),
         _ => None,
@@ -273,7 +313,9 @@ fn layout_at(
         (Some(w), _) => w,
         (None, _) => {
             if is_img {
-                200.0 // Default image fallback width
+                200.0
+            } else if is_form_control && form_control_type.as_deref() == Some("input") {
+                220.0
             } else {
                 (usable - noncontent).max(0.0)
             }
@@ -285,28 +327,92 @@ fn layout_at(
     let oy = y + margin.top;
     let cx = ox + border.left + padding.left;
     let cy = oy + border.top + padding.top;
-    let mut cursor = cy;
-    let mut children = Vec::new();
 
-    for child in &node.children {
-        if is_hidden(child) {
-            continue;
+    let gap = length(node.properties.get("gap").or_else(|| node.properties.get("grid-gap")), cw).unwrap_or(0.0);
+
+    let mut children = Vec::new();
+    let natural_h: f32;
+
+    if is_flex {
+        let flex_dir = node.properties.get("flex-direction").map(|s| s.trim()).unwrap_or("row");
+        if flex_dir == "row" {
+            let mut cursor_x = cx;
+            let mut max_row_h: f32 = 0.0;
+            let child_nodes: Vec<&StyledNode> = node.children.iter().filter(|c| !is_hidden(c)).collect();
+            let count = child_nodes.len().max(1) as f32;
+            let total_gap = (count - 1.0) * gap;
+            let default_item_w = ((cw - total_gap) / count).max(40.0);
+
+            for child in child_nodes {
+                let item_w = length(child.properties.get("width"), cw).unwrap_or(default_item_w);
+                let b = layout_at(child, cursor_x, cy, item_w, Some(fs), current_color.clone(), link_url.clone());
+                max_row_h = max_row_h.max(b.rect.height + b.margin.top + b.margin.bottom);
+                cursor_x += b.rect.width + b.margin.left + b.margin.right + gap;
+                children.push(b);
+            }
+            natural_h = max_row_h;
+        } else {
+            // flex-direction: column
+            let mut cursor_y = cy;
+            for child in &node.children {
+                if is_hidden(child) { continue; }
+                let b = layout_at(child, cx, cursor_y, cw, Some(fs), current_color.clone(), link_url.clone());
+                cursor_y += b.margin.top + b.rect.height + b.margin.bottom + gap;
+                children.push(b);
+            }
+            natural_h = (cursor_y - cy).max(0.0);
         }
-        let b = layout_at(child, cx, cursor, cw, Some(fs), current_color.clone(), link_url.clone());
-        if b.rect.width > 0.0 || b.rect.height > 0.0 || !b.children.is_empty() || b.image_src.is_some() || b.background.is_some() {
-            cursor += b.margin.top + b.rect.height + b.margin.bottom;
+    } else if is_grid {
+        let cols = parse_grid_cols(node.properties.get("grid-template-columns"));
+        let col_count = cols.max(1);
+        let total_gap = (col_count - 1) as f32 * gap;
+        let col_w = ((cw - total_gap) / col_count as f32).max(40.0);
+
+        let active_children: Vec<&StyledNode> = node.children.iter().filter(|c| !is_hidden(c)).collect();
+        let mut row_cursor = cy;
+        let mut max_row_h: f32 = 0.0;
+
+        for (idx, child) in active_children.into_iter().enumerate() {
+            let col_idx = idx % col_count;
+            if col_idx == 0 && idx > 0 {
+                row_cursor += max_row_h + gap;
+                max_row_h = 0.0;
+            }
+            let col_x = cx + col_idx as f32 * (col_w + gap);
+            let b = layout_at(child, col_x, row_cursor, col_w, Some(fs), current_color.clone(), link_url.clone());
+            max_row_h = max_row_h.max(b.rect.height);
             children.push(b);
         }
+        natural_h = (row_cursor + max_row_h - cy).max(0.0);
+    } else {
+        // Normal block layout
+        let mut cursor = cy;
+        for child in &node.children {
+            if is_hidden(child) {
+                continue;
+            }
+            let b = layout_at(child, cx, cursor, cw, Some(fs), current_color.clone(), link_url.clone());
+            if b.rect.width > 0.0 || b.rect.height > 0.0 || !b.children.is_empty() || b.image_src.is_some() || b.background.is_some() || b.is_form_control {
+                cursor += b.margin.top + b.rect.height + b.margin.bottom;
+                children.push(b);
+            }
+        }
+        natural_h = (cursor - cy).max(0.0);
     }
 
     let natural = if is_img {
-        // Default image fallback height
         match &node.node.node_type {
             NodeType::Element(e) => e.attributes.get("height").and_then(|v| length(Some(v), available)).unwrap_or(150.0),
             _ => 150.0,
         }
+    } else if is_form_control {
+        if form_control_type.as_deref() == Some("textarea") {
+            80.0
+        } else {
+            36.0
+        }
     } else {
-        (cursor - cy).max(0.0)
+        natural_h
     };
 
     let vert = padding.top + padding.bottom + border.top + border.bottom;
@@ -322,18 +428,79 @@ fn layout_at(
     };
     ch = minmax(node, "height", ch, natural.max(1.0));
 
+    // Handle relative positioning offset
+    let mut final_x = ox;
+    let mut final_y = oy;
+    let mut final_cx = cx;
+    let mut final_cy = cy;
+    let position = node.properties.get("position").map(|s| s.trim()).unwrap_or("static");
+    if position == "relative" {
+        let top_off = length(node.properties.get("top"), available).unwrap_or(0.0);
+        let left_off = length(node.properties.get("left"), available).unwrap_or(0.0);
+        final_x += left_off;
+        final_cx += left_off;
+        final_y += top_off;
+        final_cy += top_off;
+    }
+
     let rect = Rect {
-        x: ox,
-        y: oy,
+        x: final_x,
+        y: final_y,
         width: cw + noncontent,
         height: ch + vert,
     };
     let content = Rect {
-        x: cx,
-        y: cy,
+        x: final_cx,
+        y: final_cy,
         width: cw,
         height: ch,
     };
+
+    // Default form control text & colors
+    let (form_text, form_lines) = if is_form_control {
+        let display_val = form_val.or(placeholder.clone()).unwrap_or_default();
+        if !display_val.is_empty() {
+            (Some(display_val.clone()), vec![display_val])
+        } else {
+            (None, vec![])
+        }
+    } else {
+        (None, vec![])
+    };
+
+    let bg_color = node
+        .properties
+        .get("background-color")
+        .cloned()
+        .or_else(|| node.properties.get("background").cloned())
+        .or_else(|| {
+            if is_form_control {
+                if form_control_type.as_deref() == Some("button") {
+                    Some("#21262d".to_string())
+                } else {
+                    Some("#161b22".to_string())
+                }
+            } else {
+                None
+            }
+        });
+
+    let b_color = node
+        .properties
+        .get("border-color")
+        .cloned()
+        .or_else(|| {
+            node.properties
+                .get("border")
+                .and_then(|v| v.split_whitespace().last().map(str::to_string))
+        })
+        .or_else(|| {
+            if is_form_control {
+                Some("#30363d".to_string())
+            } else {
+                None
+            }
+        });
 
     LayoutBox {
         rect,
@@ -341,27 +508,36 @@ fn layout_at(
         padding,
         border,
         margin,
-        background: node
-            .properties
-            .get("background-color")
-            .cloned()
-            .or_else(|| node.properties.get("background").cloned()),
-        border_color: node
-            .properties
-            .get("border-color")
-            .cloned()
-            .or_else(|| {
-                node.properties
-                    .get("border")
-                    .and_then(|v| v.split_whitespace().last().map(str::to_string))
-            }),
-        color: node.properties.get("color").cloned(),
-        text: None,
-        text_lines: vec![],
+        background: bg_color,
+        border_color: b_color,
+        color: node.properties.get("color").cloned().or_else(|| {
+            if is_form_control {
+                Some("#e6edf3".to_string())
+            } else {
+                None
+            }
+        }),
+        text: form_text,
+        text_lines: form_lines,
         image_src,
         link_url,
+        is_form_control,
+        form_id,
+        form_control_type,
+        placeholder,
         children,
     }
+}
+
+fn parse_grid_cols(prop: Option<&String>) -> usize {
+    let Some(s) = prop else { return 2; };
+    let s = s.trim();
+    if let Some(inner) = s.strip_prefix("repeat(").and_then(|r| r.strip_suffix(')')) {
+        if let Some((n, _)) = inner.split_once(',') {
+            return n.trim().parse::<usize>().unwrap_or(2);
+        }
+    }
+    s.split_whitespace().count().max(1)
 }
 
 #[cfg(test)]
@@ -398,5 +574,28 @@ mod tests {
         let l = layout(&style_tree(&root, &parse("a { display: block; width: 200px; }")), 800.0);
         assert_eq!(l.find_link_at(10.0, 10.0), Some("https://example.com".to_string()));
         assert_eq!(l.find_link_at(500.0, 500.0), None);
+    }
+
+    #[test]
+    fn flexbox_row_layout() {
+        let item1 = Node::element("div", vec![Node::text("Item 1")]);
+        let item2 = Node::element("div", vec![Node::text("Item 2")]);
+        let root = Node::element("div", vec![item1, item2]);
+        let css = "div { display: flex; flex-direction: row; gap: 10px; width: 400px; }";
+        let l = layout(&style_tree(&root, &parse(css)), 800.0);
+        assert_eq!(l.children.len(), 2);
+        assert!(l.children[1].rect.x > l.children[0].rect.x);
+    }
+
+    #[test]
+    fn form_control_layout() {
+        let mut d = std::collections::BTreeMap::new();
+        d.insert("type".to_string(), "text".to_string());
+        d.insert("placeholder".to_string(), "Enter name...".to_string());
+        let input = Node::element_with_attributes("input", d, vec![]);
+        let root = Node::element("div", vec![input]);
+        let l = layout(&style_tree(&root, &parse("div { width: 400px; }")), 800.0);
+        assert!(l.children[0].is_form_control);
+        assert_eq!(l.children[0].form_control_type.as_deref(), Some("input"));
     }
 }

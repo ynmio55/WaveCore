@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    html, body {
+      background-color: #0d1117;
+      color: #c9d1d9;
+      font-family: Sarabun, sans-serif;
+      margin: 0px;
+      padding: 16px;
+    }
+    .navbar {
+      display: flex;
+      flex-direction: row;
+      gap: 16px;
+      background-color: #161b22;
+      border: 1px solid #30363d;
+      padding: 12px 16px;
+      margin-bottom: 20px;
+    }
+    .nav-brand {
+      color: #58a6ff;
+      font-size: 20px;
+    }
+    .nav-links {
+      display: flex;
+      flex-direction: row;
+      gap: 12px;
+    }
+    .grid-container {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background-color: #161b22;
+      border: 1px solid #30363d;
+      padding: 14px;
+    }
+    .form-section {
+      background-color: #21262d;
+      border: 1px solid #388bfd;
+      padding: 18px;
+      margin-bottom: 20px;
+    }
+    .form-group {
+      margin-bottom: 12px;
+    }
+    .btn-submit {
+      background-color: #238636;
+      color: #ffffff;
+      padding: 8px 18px;
+      border: 1px solid #2ea043;
+    }
+  </style>
+</head>
+<body>
+  <div class="navbar">
+    <div class="nav-brand">WaveCore Engine v0.1 (Stages 1&ndash;15)</div>
+    <div class="nav-links">
+      <a href="examples/nav_home.html" style="color: #58a6ff;">หน้าหลัก</a>
+      <a href="examples/nav_about.html" style="color: #58a6ff;">เกี่ยวกับ</a>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom: 16px; border: 1px solid #238636;">
+    <h2 style="color: #3fb950; margin-top: 0px;">ความคืบหน้าระยะที่ 11 ถึง 15 (Stages 11-15 Complete)</h2>
+    <p id="statusMsg">&bull; กำลังโหลดสถานะระบบ Pulse JavaScript Engine...</p>
+    <p>&bull; <strong>Stage 11 (Forms):</strong> กล่องข้อความ (Input), ปุ่มกด (Button), กล่องพิมพ์ยาว (Textarea)</p>
+    <p>&bull; <strong>Stage 12 (Pulse JS):</strong> Lexer &rarr; Parser &rarr; Bytecode &rarr; Stack Virtual Machine</p>
+    <p>&bull; <strong>Stage 13 (DOM ↔ JS):</strong> document.getElementById, setInnerText, event listeners, fetch</p>
+    <p>&bull; <strong>Stage 14 (Modern Layout):</strong> Flexbox (row/col/gap), CSS Grid (columns/gap), Positioning</p>
+    <p>&bull; <strong>Stage 15 (Storage):</strong> HTTP CookieJar, LocalStorage (JSON disk/memory), HTTP Cache</p>
+  </div>
+
+  <div class="grid-container">
+    <div class="card">
+      <h3 style="color: #79c0ff; margin-top: 0px;">1. Flexbox Layout</h3>
+      <p>จัดวางแถบนำทางด้านบน (Navbar) แนวนอนด้วย display: flex และ gap: 16px</p>
+    </div>
+    <div class="card">
+      <h3 style="color: #7ee787; margin-top: 0px;">2. CSS Grid</h3>
+      <p>การ์ด 3 ช่องนี้ถูกจัดเรียงอัตโนมัติด้วย display: grid และ grid-template-columns</p>
+    </div>
+    <div class="card">
+      <h3 style="color: #ffa657; margin-top: 0px;">3. Pulse VM &amp; DOM</h3>
+      <p id="jsCounterBox">ผลลัพธ์คำนวณจาก JavaScript Pulse VM: กำลังประมวลผล...</p>
+    </div>
+  </div>
+
+  <div class="form-section">
+    <h3 style="color: #58a6ff; margin-top: 0px;">ทดสอบแบบฟอร์มและการพิมพ์ (Stage 11 Forms &amp; Input)</h3>
+    <div class="form-group">
+      <p style="margin-bottom: 4px;">ชื่อผู้ใช้งาน (Username):</p>
+      <input type="text" id="usernameInput" value="WaveCore_Developer" placeholder="พิมพ์ชื่อผู้ใช้...">
+    </div>
+    <div class="form-group">
+      <p style="margin-bottom: 4px;">ข้อความบันทึก (Notes):</p>
+      <input type="text" id="notesInput" value="ทดสอบระบบพิมพ์ภาษาไทยและอังกฤษ 100%" placeholder="บันทึกข้อความ...">
+    </div>
+    <div style="margin-top: 14px;">
+      <button id="submitBtn" class="btn-submit">บันทึกข้อมูล (Save to LocalStorage)</button>
+    </div>
+  </div>
+
+  <script>
+    // รันสคริปต์อัตโนมัติผ่าน Pulse JS VM
+    let statusElem = document.getElementById("statusMsg");
+    statusElem.setInnerText("ระบบ Pulse JS Engine & DOM Bridge ทำงานสำเร็จสมบูรณ์ 100%!");
+
+    let counterElem = document.getElementById("jsCounterBox");
+    let total = 0;
+    for (let i = 1; i <= 10; i = i + 1) {
+      total = total + i;
+    }
+    counterElem.setInnerText("ผลรวม 1 ถึง 10 คำนวณโดย Pulse VM = " + total + " (ถูกต้อง)");
+
+    // บันทึกสถานะลง LocalStorage
+    localStorage.setItem("app_status", "ready");
+    localStorage.setItem("engine", "WaveCore");
+  </script>
+
+  <div style="margin-top: 20px; color: #8b949e; text-align: center;">
+    <p>WaveCore Browser Project &copy; 2026 &mdash; Rust Engine Powered by Pulse VM</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,10 @@
+[package]
+name = "wavecore-js"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Pulse JavaScript Engine and DOM Bindings for WaveCore"
+
+[dependencies]
+wavecore-dom = { path = "../wavecore-dom" }
+wavecore-net = { path = "../wavecore-net" }
