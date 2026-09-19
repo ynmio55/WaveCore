@@ -135,4 +135,22 @@ mod tests {
         assert_eq!(result, JsValue::Number(200.0));
     }
 
+    #[test]
+    fn conditional_and_short_circuit_operators() {
+        let mut vm = VM::new();
+        let res = eval_script(
+            r#"
+                let side = 0;
+                false && (side = 1);
+                true || (side = 2);
+                let a = true ? 10 : 20;
+                let b = false ? 30 : 40;
+                a + b + side;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(res, JsValue::Number(50.0));
+    }
+
 }
