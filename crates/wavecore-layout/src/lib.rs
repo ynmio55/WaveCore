@@ -1,4 +1,4 @@
-use wavecore_dom::NodeType;
+use wavecore_dom::{NodeId, NodeType};
 use wavecore_style::StyledNode;
 use wavecore_text::{measure_and_wrap, TextStyle};
 
@@ -50,6 +50,7 @@ pub enum BoxSizing {
 
 #[derive(Debug, Clone)]
 pub struct LayoutBox {
+    pub node_id: Option<NodeId>,
     pub rect: Rect,
     pub content: Rect,
     pub padding: Edges,
@@ -315,6 +316,7 @@ fn layout_at(
 ) -> LayoutBox {
     if is_hidden(node) {
         return LayoutBox {
+            node_id: Some(node.node_id()),
             rect: Rect::default(),
             content: Rect::default(),
             padding: Edges::default(),
@@ -350,7 +352,11 @@ fn layout_at(
             let src = if img { e.attributes.get("src").cloned() } else { None };
             let is_form = e.is_form_control();
             let fid = e.id().map(String::from);
-            let ftype = Some(e.tag_name.clone());
+            let ftype = Some(if e.tag_name.eq_ignore_ascii_case("input") {
+                e.input_type().to_ascii_lowercase()
+            } else {
+                e.tag_name.to_ascii_lowercase()
+            });
             let ph = e.placeholder().map(String::from);
             let val = e.value().map(String::from);
             let media = e.tag_name.eq_ignore_ascii_case("video") || e.tag_name.eq_ignore_ascii_case("audio");
@@ -373,6 +379,7 @@ fn layout_at(
         );
         let h = metrics.height;
         return LayoutBox {
+            node_id: Some(node.node_id()),
             rect: Rect { x, y, width: available, height: h },
             content: Rect { x, y, width: available, height: h },
             padding: Edges::default(),
@@ -727,6 +734,7 @@ fn layout_at(
         });
 
     LayoutBox {
+        node_id: Some(node.node_id()),
         rect,
         content,
         padding,
