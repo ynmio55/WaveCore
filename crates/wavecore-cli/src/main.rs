@@ -5,9 +5,10 @@ use wavecore_dom::Node;
 use wavecore_html::{extract_scripts, extract_styles};
 use wavecore_js::{eval_script, DomBridge, JsObject, JsValue, VM};
 use wavecore_layout::{LayoutBox, Rect};
-use wavecore_net::{fetch_resource, NavigationController};
+use wavecore_net::{NavigationController, NetworkClient};
 use wavecore_pixels::{Rgba, Surface};
 use wavecore_render::DisplayCommand;
+use wavecore_sandbox::Origin;
 use wavecore_storage::WebStorage;
 use wavecore_window::{BrowserWindow, WindowEvent};
 
@@ -37,18 +38,25 @@ fn profile_root() -> PathBuf {
 fn prepare_document(
     url: &str,
     extra_css: &str,
+    network_client: Rc<RefCell<NetworkClient>>,
 ) -> Result<(BrowserState, String), String> {
-    let resp = fetch_resource(url).map_err(|e| format!("Failed to load '{url}': {e}"))?;
+    let resp = network_client
+        .borrow_mut()
+        .fetch(url)
+        .map_err(|e| format!("Failed to load '{url}': {e}"))?;
     let parsed_dom = wavecore_html::parse(&resp.content);
     let dom = Rc::new(RefCell::new(parsed_dom));
 
     let mut vm = VM::new();
-    let bridge = DomBridge::with_url(dom.clone(), url);
+    let bridge = DomBridge::with_url_and_client(dom.clone(), url, network_client);
     bridge.attach_to_vm(&mut vm);
 
     // Persistent localStorage, isolated by the current page/origin key.
     let storage_dir = profile_root().join("local-storage");
-    let local_storage = WebStorage::new_persistent(&storage_dir, url);
+    let storage_origin = Origin::parse(url)
+        .map(|o| o.to_string_repr())
+        .unwrap_or_else(|_| url.to_string());
+    let local_storage = WebStorage::new_persistent(&storage_dir, &storage_origin);
     let ls_ref = Rc::new(RefCell::new(local_storage));
     let mut ls_obj = JsObject::new();
 
@@ -164,6 +172,7 @@ fn main() {
         .unwrap_or_default();
 
     let mut nav = NavigationController::new(initial_url.clone());
+    let network_client = Rc::new(RefCell::new(NetworkClient::new()));
 
     if gui_mode {
         let mut width = 800;
@@ -189,7 +198,7 @@ fn main() {
         println!("  - F5 / Ctrl+R: Reload");
         println!("  - ESC: Exit");
 
-        let (mut state, mut full_css) = match prepare_document(&initial_url, &extra_css) {
+        let (mut state, mut full_css) = match prepare_document(&initial_url, &extra_css, network_client.clone()) {
             Ok(res) => res,
             Err(e) => {
                 eprintln!("wavecore error: {e}");
@@ -316,7 +325,7 @@ fn main() {
             if let Some(target) = needs_navigate {
                 nav.push(target.clone());
                 win.set_title(&format!("WaveCore - {target}"));
-                match prepare_document(&target, &extra_css) {
+                match prepare_document(&target, &extra_css, network_client.clone()) {
                     Ok((ns, nc)) => {
                         state = ns;
                         full_css = nc;
@@ -389,7 +398,7 @@ fn main() {
             }
         }
     } else {
-        let (state, full_css) = match prepare_document(&initial_url, &extra_css) {
+        let (state, full_css) = match prepare_document(&initial_url, &extra_css, network_client.clone()) {
             Ok(res) => res,
             Err(e) => {
                 eprintln!("wavecore error: {e}");
