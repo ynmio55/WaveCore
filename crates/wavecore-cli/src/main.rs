@@ -4,7 +4,7 @@ use std::{env, fs, process};
 use wavecore_dom::Node;
 use wavecore_html::{extract_scripts, extract_styles};
 use wavecore_js::{eval_script, DomBridge, JsObject, JsValue, VM};
-use wavecore_layout::LayoutBox;
+use wavecore_layout::{LayoutBox, Rect};
 use wavecore_net::{fetch_resource, NavigationController};
 use wavecore_pixels::{Rgba, Surface};
 use wavecore_render::DisplayCommand;
@@ -186,9 +186,14 @@ fn main() {
         surface.paint(&display_list);
         let _ = win.present(&surface);
 
+        let mut focused_rect: Option<Rect> = None;
+
         while win.update() {
             let events = win.poll_events();
             let mut needs_re_render = false;
+            let mut needs_repaint = false;
+            let mut full_repaint = false;
+            let mut damage_doc: Vec<Rect> = Vec::new();
             let mut needs_navigate = None;
 
             for event in events {
@@ -202,6 +207,7 @@ fn main() {
                         } else if let Some(control) = layout.find_form_control_at(x, y) {
                             if let Some(fid) = &control.form_id {
                                 state.focused_id = Some(fid.clone());
+                                focused_rect = Some(control.rect);
                                 println!("Focused form control: #{}", fid);
 
                                 // If button or submit, dispatch click event to Pulse JS
@@ -210,10 +216,12 @@ fn main() {
                                 {
                                     state.bridge.dispatch_event(&mut state.vm, fid, "click");
                                     needs_re_render = true;
+                                    full_repaint = true;
                                 }
                             }
                         } else {
                             state.focused_id = None;
+                            focused_rect = None;
                         }
                     }
                     WindowEvent::TextInput(ch) => {
@@ -225,6 +233,11 @@ fn main() {
                                     current.push(ch);
                                     e.set_attribute("value", current);
                                     needs_re_render = true;
+                                    if let Some(rect) = focused_rect {
+                                        damage_doc.push(rect);
+                                    } else {
+                                        full_repaint = true;
+                                    }
                                 }
                             }
                         }
@@ -238,6 +251,11 @@ fn main() {
                                     current.pop();
                                     e.set_attribute("value", current);
                                     needs_re_render = true;
+                                    if let Some(rect) = focused_rect {
+                                        damage_doc.push(rect);
+                                    } else {
+                                        full_repaint = true;
+                                    }
                                 }
                             }
                         } else if let Some(prev) = nav.go_back().map(str::to_string) {
@@ -263,6 +281,10 @@ fn main() {
                             needs_navigate = Some(current.to_string());
                         }
                     }
+                    WindowEvent::Scroll(_) => {
+                        needs_repaint = true;
+                        full_repaint = true;
+                    }
                     _ => {}
                 }
             }
@@ -274,7 +296,9 @@ fn main() {
                     Ok((ns, nc)) => {
                         state = ns;
                         full_css = nc;
+                        focused_rect = None;
                         needs_re_render = true;
+                        full_repaint = true;
                     }
                     Err(e) => {
                         eprintln!("Navigation load error: {e}");
@@ -287,6 +311,7 @@ fn main() {
                 height = nh;
                 surface = Surface::new(width as u32, height as u32);
                 needs_re_render = true;
+                full_repaint = true;
             }
 
             let scroll_y = win.scroll_y;
@@ -295,22 +320,48 @@ fn main() {
                 let (nl, nd) = layout_and_render(&state.dom.borrow(), &full_css, width as f32);
                 layout = nl;
                 display_list = nd;
-                surface.clear(Rgba(13, 17, 23, 255));
-                surface.paint_offset(&display_list, 0.0, -scroll_y);
+                needs_repaint = true;
+            }
 
-                if !surface.damage_rects.is_empty() {
-                    let rects = surface.damage_rects.clone();
-                    if let Err(e) = win.present_damage(&surface, &rects) {
-                        eprintln!("wavecore: window damage render error: {e}");
-                        break;
-                    }
-                    surface.damage_rects.clear();
-                } else if let Err(e) = win.present(&surface) {
-                    eprintln!("wavecore: window render error: {e}");
+            if needs_repaint {
+                if full_repaint || damage_doc.is_empty() {
+                    // Damage is expressed in document coordinates so scrolling can be
+                    // applied consistently by paint_damage_offset.
+                    damage_doc.clear();
+                    damage_doc.push(Rect {
+                        x: 0.0,
+                        y: scroll_y,
+                        width: width as f32,
+                        height: height as f32,
+                    });
+                }
+
+                // Clear only damaged screen regions instead of repainting the full surface.
+                let screen_damage: Vec<Rect> = damage_doc
+                    .iter()
+                    .map(|d| Rect {
+                        x: d.x,
+                        y: d.y - scroll_y,
+                        width: d.width,
+                        height: d.height,
+                    })
+                    .filter(|d| {
+                        d.x + d.width > 0.0
+                            && d.y + d.height > 0.0
+                            && d.x < width as f32
+                            && d.y < height as f32
+                    })
+                    .collect();
+
+                for d in &screen_damage {
+                    surface.fill_rect(d.x, d.y, d.width, d.height, Rgba(13, 17, 23, 255));
+                }
+                surface.paint_damage_offset(&display_list, &damage_doc, 0.0, -scroll_y);
+
+                if let Err(e) = win.present_damage(&surface, &screen_damage) {
+                    eprintln!("wavecore: window damage render error: {e}");
                     break;
                 }
-            } else {
-                win.update();
             }
         }
     } else {
