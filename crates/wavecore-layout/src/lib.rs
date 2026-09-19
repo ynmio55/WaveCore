@@ -67,6 +67,10 @@ pub struct LayoutBox {
     pub form_control_type: Option<String>,
     pub placeholder: Option<String>,
     pub overflow_hidden: bool,
+    pub is_media: bool,
+    pub is_canvas: bool,
+    pub is_svg: bool,
+    pub is_dirty: bool,
     pub children: Vec<LayoutBox>,
 }
 
@@ -100,6 +104,48 @@ impl LayoutBox {
 
 pub fn layout(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     layout_at(root, 0.0, 0.0, viewport_width, None, None, None)
+}
+
+#[derive(Default, Clone)]
+pub struct LayoutCache {
+    pub cached_root: Option<LayoutBox>,
+    pub last_viewport_width: Option<f32>,
+}
+
+impl LayoutCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn layout(&mut self, root: &StyledNode, viewport_width: f32, is_dirty: bool) -> LayoutBox {
+        if !is_dirty && self.last_viewport_width == Some(viewport_width) {
+            if let Some(cached) = &self.cached_root {
+                return cached.clone();
+            }
+        }
+
+        let computed = layout(root, viewport_width);
+        self.cached_root = Some(computed.clone());
+        self.last_viewport_width = Some(viewport_width);
+        computed
+    }
+}
+
+pub struct LayoutWorkerPool;
+
+impl LayoutWorkerPool {
+    pub fn compute_async<F, T>(task: F) -> std::sync::mpsc::Receiver<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = task();
+            let _ = tx.send(res);
+        });
+        rx
+    }
 }
 
 fn length(v: Option<&String>, base: f32) -> Option<f32> {
@@ -220,6 +266,10 @@ fn layout_at(
             form_control_type: None,
             placeholder: None,
             overflow_hidden: false,
+            is_media: false,
+            is_canvas: false,
+            is_svg: false,
+            is_dirty: false,
             children: vec![],
         };
     }
@@ -227,7 +277,7 @@ fn layout_at(
     let fs = font_size(node, inherited_font);
     let current_color = node.properties.get("color").cloned().or(inherited_color);
 
-    let (link_url, image_src, is_img, is_form_control, form_id, form_control_type, placeholder, form_val) = match &node.node.node_type {
+    let (link_url, image_src, is_img, is_form_control, form_id, form_control_type, placeholder, form_val, is_media, is_canvas, is_svg) = match &node.node.node_type {
         NodeType::Element(e) => {
             let l = e.attributes.get("href").cloned().or(inherited_link.clone());
             let img = e.tag_name.eq_ignore_ascii_case("img");
@@ -237,9 +287,12 @@ fn layout_at(
             let ftype = Some(e.tag_name.clone());
             let ph = e.placeholder().map(String::from);
             let val = e.value().map(String::from);
-            (l, src, img, is_form, fid, ftype, ph, val)
+            let media = e.tag_name.eq_ignore_ascii_case("video") || e.tag_name.eq_ignore_ascii_case("audio");
+            let canvas = e.tag_name.eq_ignore_ascii_case("canvas");
+            let svg = e.tag_name.eq_ignore_ascii_case("svg");
+            (l, src, img, is_form, fid, ftype, ph, val, media, canvas, svg)
         }
-        _ => (inherited_link.clone(), None, false, false, None, None, None, None),
+        _ => (inherited_link.clone(), None, false, false, None, None, None, None, false, false, false),
     };
 
     if let NodeType::Text(text) = &node.node.node_type {
@@ -271,6 +324,10 @@ fn layout_at(
             form_control_type: None,
             placeholder: None,
             overflow_hidden: false,
+            is_media: false,
+            is_canvas: false,
+            is_svg: false,
+            is_dirty: false,
             children: vec![],
         };
     }
@@ -335,6 +392,10 @@ fn layout_at(
         (None, _) => {
             if is_img {
                 200.0
+            } else if is_media {
+                300.0
+            } else if is_canvas || is_svg {
+                300.0
             } else if is_form_control && form_control_type.as_deref() == Some("input") {
                 220.0
             } else {
@@ -455,6 +516,22 @@ fn layout_at(
     }
 
     let natural = if is_img {
+        match &node.node.node_type {
+            NodeType::Element(e) => e.attributes.get("height").and_then(|v| length(Some(v), available)).unwrap_or(150.0),
+            _ => 150.0,
+        }
+    } else if is_media {
+        match &node.node.node_type {
+            NodeType::Element(e) => {
+                if e.tag_name.eq_ignore_ascii_case("audio") {
+                    48.0
+                } else {
+                    e.attributes.get("height").and_then(|v| length(Some(v), available)).unwrap_or(180.0)
+                }
+            }
+            _ => 180.0,
+        }
+    } else if is_canvas || is_svg {
         match &node.node.node_type {
             NodeType::Element(e) => e.attributes.get("height").and_then(|v| length(Some(v), available)).unwrap_or(150.0),
             _ => 150.0,
@@ -593,6 +670,10 @@ fn layout_at(
         form_control_type,
         placeholder,
         overflow_hidden,
+        is_media,
+        is_canvas,
+        is_svg,
+        is_dirty: false,
         children,
     }
 }
@@ -688,5 +769,43 @@ mod tests {
         let l = layout(&style_tree(&root, &parse(css)), 800.0);
         assert_eq!(l.children[0].rect.x, 25.0);
         assert_eq!(l.children[0].rect.y, 15.0);
+    }
+
+    #[test]
+    fn incremental_layout_cache_and_worker_pool() {
+        let node = Node::element("div", vec![Node::text("Cached content")]);
+        let styled = style_tree(&node, &parse("div { width: 350px; height: 120px; }"));
+
+        let mut cache = LayoutCache::new();
+        let l1 = cache.layout(&styled, 800.0, true);
+        assert_eq!(l1.content.width, 350.0);
+
+        // When not dirty and same viewport, returns cached without recalculating
+        let l2 = cache.layout(&styled, 800.0, false);
+        assert_eq!(l2.content.width, 350.0);
+
+        // Async worker computation
+        let rx = LayoutWorkerPool::compute_async(move || {
+            let n = Node::element("div", vec![Node::text("Worker layout")]);
+            layout(&style_tree(&n, &parse("div { width: 500px; }")), 1000.0)
+        });
+        let res = rx.recv().expect("Worker thread failed");
+        assert_eq!(res.content.width, 500.0);
+    }
+
+    #[test]
+    fn box_sizing_and_media_element_layout() {
+        let video_node = Node::element("video", vec![]);
+        let root = Node::element("div", vec![video_node]);
+        let css = "video { width: 400px; height: 200px; padding: 10px; border: 5px solid black; box-sizing: border-box; }";
+        let l = layout(&style_tree(&root, &parse(css)), 800.0);
+        let vid = &l.children[0];
+        assert!(vid.is_media);
+        // In border-box: content.width = 400 - (10*2 + 5*2) = 370.0
+        assert_eq!(vid.content.width, 370.0);
+        // content.height = 200 - (10*2 + 5*2) = 170.0
+        assert_eq!(vid.content.height, 170.0);
+        // Total box width = 400.0
+        assert_eq!(vid.rect.width, 400.0);
     }
 }

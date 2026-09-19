@@ -1,9 +1,27 @@
 use std::collections::BTreeMap;
 use wavecore_dom::Node;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentMode {
+    Standards,
+    Quirks,
+}
+
 pub fn parse(input: &str) -> Node {
     let mut parser = Parser { input, pos: 0 };
     Node::document(parser.parse_nodes(None))
+}
+
+pub fn parse_with_mode(input: &str) -> (Node, DocumentMode) {
+    let trimmed = input.trim_start();
+    let mode = if trimmed.to_ascii_lowercase().starts_with("<!doctype html")
+        || trimmed.to_ascii_lowercase().starts_with("<!doctype")
+    {
+        DocumentMode::Standards
+    } else {
+        DocumentMode::Quirks
+    };
+    (parse(input), mode)
 }
 struct Parser<'a> { input: &'a str, pos: usize }
 impl<'a> Parser<'a> {
@@ -105,6 +123,14 @@ pub fn decode_entities(input: &str) -> String {
                     "trade" => out.push('™'),
                     "mdash" => out.push('—'),
                     "ndash" => out.push('–'),
+                    "hellip" => out.push('…'),
+                    "euro" => out.push('€'),
+                    "pound" => out.push('£'),
+                    "yen" => out.push('¥'),
+                    "deg" => out.push('°'),
+                    "plusmn" => out.push('±'),
+                    "times" => out.push('×'),
+                    "divide" => out.push('÷'),
                     s if s.starts_with("#x") || s.starts_with("#X") => {
                         if let Ok(val) = u32::from_str_radix(&s[2..], 16) {
                             if let Some(ch) = char::from_u32(val) {
@@ -228,5 +254,18 @@ mod tests {
         assert_eq!(scripts.len(), 2);
         assert_eq!(scripts[0], "let x = 10;");
         assert_eq!(scripts[1], "console.log('hi');");
+    }
+
+    #[test]
+    fn doctype_and_entity_extensions() {
+        let (dom_standards, mode_std) = parse_with_mode("<!DOCTYPE html><html><body>&euro; 100 &plusmn; 5 &hellip;</body></html>");
+        assert_eq!(mode_std, DocumentMode::Standards);
+        let html_node = &dom_standards.children[0];
+        let body_node = &html_node.children[0];
+        let NodeType::Text(text) = &body_node.children[0].node_type else { panic!() };
+        assert_eq!(text, "€ 100 ± 5 …");
+
+        let (_, mode_quirks) = parse_with_mode("<div>No doctype page</div>");
+        assert_eq!(mode_quirks, DocumentMode::Quirks);
     }
 }

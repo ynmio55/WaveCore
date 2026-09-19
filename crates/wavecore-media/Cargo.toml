@@ -1,0 +1,10 @@
+[package]
+name = "wavecore-media"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Audio/Video elements, PCM audio buffer decoding, and playback pipeline for WaveCore"
+
+[dependencies]
+wavecore-dom = { path = "../wavecore-dom" }
+wavecore-pixels = { path = "../wavecore-pixels" }

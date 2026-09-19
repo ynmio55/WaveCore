@@ -15,3 +15,5 @@ wavecore-window = { path = "../wavecore-window" }
 wavecore-net = { path = "../wavecore-net" }
 wavecore-js = { path = "../wavecore-js" }
 wavecore-storage = { path = "../wavecore-storage" }
+wavecore-sandbox = { path = "../wavecore-sandbox" }
+wavecore-media = { path = "../wavecore-media" }

@@ -572,5 +572,94 @@ fn create_element_wrapper(
         }),
     );
 
+    // getContext(type) for canvas elements
+    elem_obj.set(
+        "getContext",
+        JsValue::native("getContext", move |_vm, args| {
+            let ctx_name = args.first().map(|a| a.to_js_string()).unwrap_or_else(|| "2d".to_string());
+            if ctx_name == "2d" {
+                Ok(JsValue::Object(Rc::new(RefCell::new(create_canvas_2d_context()))))
+            } else if ctx_name == "webgl" || ctx_name == "experimental-webgl" {
+                Ok(JsValue::Object(Rc::new(RefCell::new(create_webgl_context()))))
+            } else {
+                Ok(JsValue::Null)
+            }
+        }),
+    );
+
+    // Media element methods (play, pause)
+    elem_obj.set(
+        "play",
+        JsValue::native("play", move |_vm, _args| {
+            Ok(JsValue::Undefined)
+        }),
+    );
+    elem_obj.set(
+        "pause",
+        JsValue::native("pause", move |_vm, _args| {
+            Ok(JsValue::Undefined)
+        }),
+    );
+
     JsValue::Object(Rc::new(RefCell::new(elem_obj)))
+}
+
+fn create_canvas_2d_context() -> JsObject {
+    let mut ctx = JsObject::new();
+    ctx.set("fillStyle", JsValue::String("#000000".to_string()));
+    ctx.set("strokeStyle", JsValue::String("#000000".to_string()));
+    ctx.set("lineWidth", JsValue::Number(1.0));
+    ctx.set("isCanvas2D", JsValue::Boolean(true));
+
+    ctx.set("fillRect", JsValue::native("fillRect", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("clearRect", JsValue::native("clearRect", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("strokeRect", JsValue::native("strokeRect", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("beginPath", JsValue::native("beginPath", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("moveTo", JsValue::native("moveTo", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("lineTo", JsValue::native("lineTo", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("arc", JsValue::native("arc", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("closePath", JsValue::native("closePath", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("fill", JsValue::native("fill", |_vm, _args| Ok(JsValue::Undefined)));
+    ctx.set("stroke", JsValue::native("stroke", |_vm, _args| Ok(JsValue::Undefined)));
+
+    ctx
+}
+
+fn create_webgl_context() -> JsObject {
+    let mut gl = JsObject::new();
+    gl.set("isWebGL", JsValue::Boolean(true));
+    gl.set("COLOR_BUFFER_BIT", JsValue::Number(16384.0));
+    gl.set("DEPTH_BUFFER_BIT", JsValue::Number(256.0));
+    gl.set("TRIANGLES", JsValue::Number(4.0));
+    gl.set("ARRAY_BUFFER", JsValue::Number(34962.0));
+    gl.set("STATIC_DRAW", JsValue::Number(35044.0));
+
+    gl.set("viewport", JsValue::native("viewport", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("clearColor", JsValue::native("clearColor", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("clear", JsValue::native("clear", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("createBuffer", JsValue::native("createBuffer", |_vm, _args| {
+        let mut buf = JsObject::new();
+        buf.set("_webglBufferId", JsValue::Number(1.0));
+        Ok(JsValue::Object(Rc::new(RefCell::new(buf))))
+    }));
+    gl.set("bindBuffer", JsValue::native("bindBuffer", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("bufferData", JsValue::native("bufferData", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("createShader", JsValue::native("createShader", |_vm, _args| {
+        let mut s = JsObject::new();
+        s.set("_webglShaderId", JsValue::Number(1.0));
+        Ok(JsValue::Object(Rc::new(RefCell::new(s))))
+    }));
+    gl.set("shaderSource", JsValue::native("shaderSource", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("compileShader", JsValue::native("compileShader", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("createProgram", JsValue::native("createProgram", |_vm, _args| {
+        let mut p = JsObject::new();
+        p.set("_webglProgramId", JsValue::Number(1.0));
+        Ok(JsValue::Object(Rc::new(RefCell::new(p))))
+    }));
+    gl.set("attachShader", JsValue::native("attachShader", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("linkProgram", JsValue::native("linkProgram", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("useProgram", JsValue::native("useProgram", |_vm, _args| Ok(JsValue::Undefined)));
+    gl.set("drawArrays", JsValue::native("drawArrays", |_vm, _args| Ok(JsValue::Undefined)));
+
+    gl
 }

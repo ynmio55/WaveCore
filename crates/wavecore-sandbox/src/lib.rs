@@ -350,9 +350,17 @@ impl IpcChannel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessStatus {
+    Running,
+    Crashed,
+    Terminated,
+}
+
 pub struct IsolatedRenderHost {
     pub sandbox: RenderProcessSandbox,
     pub endpoint: RenderEndpoint,
+    pub status: ProcessStatus,
 }
 
 impl IsolatedRenderHost {
@@ -360,10 +368,31 @@ impl IsolatedRenderHost {
         Self {
             sandbox: RenderProcessSandbox::new_isolated(process_id, origin),
             endpoint,
+            status: ProcessStatus::Running,
         }
     }
 
+    pub fn is_crashed(&self) -> bool {
+        self.status == ProcessStatus::Crashed
+    }
+
+    pub fn simulate_crash(&mut self) {
+        self.status = ProcessStatus::Crashed;
+    }
+
+    pub fn respawn(&mut self, new_endpoint: RenderEndpoint) {
+        self.status = ProcessStatus::Running;
+        self.endpoint = new_endpoint;
+    }
+
+    pub fn generate_sad_tab_html() -> &'static str {
+        "<!DOCTYPE html><html><head><title>Aw, Snap! - WaveCore</title><style>body{background:#0F172A;color:#F8FAFC;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.crash-box{text-align:center;max-width:480px;padding:32px;background:#1E293B;border-radius:12px;border:1px solid:#334155;}h1{color:#38BDF8;font-size:24px;margin-bottom:8px;}p{color:#94A3B8;font-size:14px;line-height:1.5;}.btn{display:inline-block;margin-top:16px;padding:10px 24px;background:#3B82F6;color:white;border-radius:6px;text-decoration:none;font-weight:bold;}</style></head><body><div class=\"crash-box\"><h1>Aw, Snap!</h1><p>Something went wrong while displaying this webpage.<br>WaveCore protected your system by isolating the crashed render process.</p><p><small style=\"color:#64748B;\">Error code: RESULT_CODE_KILLED_BAD_MESSAGE</small></p><a href=\"#\" class=\"btn\">Reload Page</a></div></body></html>"
+    }
+
     pub fn request_resource(&self, request_id: u64, url: &str) -> Result<(), String> {
+        if self.status != ProcessStatus::Running {
+            return Err("Render process is not running".to_string());
+        }
         // A sandboxed renderer must not open the network itself. Resource loads are
         // intentionally brokered to the browser endpoint, which can apply cookies,
         // CORS, cache policy, permissions, and auditing before returning ResourceData.
@@ -380,11 +409,143 @@ impl IsolatedRenderHost {
         damage_rects: Vec<Rect>,
         title: Option<String>,
     ) -> Result<(), String> {
+        if self.status != ProcessStatus::Running {
+            return Err("Render process is not running".to_string());
+        }
         self.endpoint.send(RenderToBrowserMessage::FrameRendered {
             display_list,
             damage_rects,
             title,
         })
+    }
+}
+
+/// Computes the registrable domain (eTLD+1) for Site Isolation.
+pub fn registrable_domain(host: &str) -> String {
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() || host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() {
+        return host;
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() <= 2 {
+        host
+    } else {
+        // e.g. ["sub", "example", "com"] -> "example.com"
+        // e.g. ["a", "b", "co", "uk"] -> "b.co.uk"
+        let len = parts.len();
+        let second_last = parts[len - 2];
+        if matches!(second_last, "co" | "com" | "net" | "org" | "gov" | "ac" | "in" | "or") && len >= 3 {
+            format!("{}.{}.{}", parts[len - 3], parts[len - 2], parts[len - 1])
+        } else {
+            format!("{}.{}", parts[len - 2], parts[len - 1])
+        }
+    }
+}
+
+/// Represents an isolated site boundary (Scheme + Registrable Domain).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SiteInstance {
+    pub site: String,
+}
+
+impl SiteInstance {
+    pub fn for_origin(origin: &Origin) -> Self {
+        match origin {
+            Origin::Tuple { scheme, host, .. } => {
+                let reg = registrable_domain(host);
+                Self {
+                    site: format!("{scheme}://{reg}"),
+                }
+            }
+            Origin::Opaque(id) => Self {
+                site: format!("opaque:{id}"),
+            },
+        }
+    }
+}
+
+/// Manages multi-process Site Isolation, mapping each SiteInstance to a distinct isolated render process.
+pub struct SiteIsolationManager {
+    instances: HashMap<SiteInstance, u32>,
+    next_process_id: u32,
+}
+
+impl SiteIsolationManager {
+    pub fn new() -> Self {
+        Self {
+            instances: HashMap::new(),
+            next_process_id: 1,
+        }
+    }
+
+    pub fn get_or_assign_process_id(&mut self, origin: &Origin) -> u32 {
+        let site_instance = SiteInstance::for_origin(origin);
+        if let Some(&pid) = self.instances.get(&site_instance) {
+            pid
+        } else {
+            let pid = self.next_process_id;
+            self.next_process_id += 1;
+            self.instances.insert(site_instance, pid);
+            pid
+        }
+    }
+
+    pub fn are_sites_isolated(&self, o1: &Origin, o2: &Origin) -> bool {
+        let s1 = SiteInstance::for_origin(o1);
+        let s2 = SiteInstance::for_origin(o2);
+        s1 != s2
+    }
+}
+
+impl Default for SiteIsolationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// W3C HTML5 `<iframe>` Sandbox Policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IframeSandboxPolicy {
+    pub is_sandboxed: bool,
+    pub allow_scripts: bool,
+    pub allow_same_origin: bool,
+    pub allow_forms: bool,
+    pub allow_top_navigation: bool,
+}
+
+impl IframeSandboxPolicy {
+    pub fn parse(sandbox_attr: Option<&str>) -> Self {
+        match sandbox_attr {
+            None => Self {
+                is_sandboxed: false,
+                allow_scripts: true,
+                allow_same_origin: true,
+                allow_forms: true,
+                allow_top_navigation: true,
+            },
+            Some(tokens) => {
+                let parts: Vec<&str> = tokens.split_whitespace().collect();
+                Self {
+                    is_sandboxed: true,
+                    allow_scripts: parts.contains(&"allow-scripts"),
+                    allow_same_origin: parts.contains(&"allow-same-origin"),
+                    allow_forms: parts.contains(&"allow-forms"),
+                    allow_top_navigation: parts.contains(&"allow-top-navigation"),
+                }
+            }
+        }
+    }
+
+    pub fn effective_origin(&self, parent_origin: &Origin) -> Origin {
+        if !self.is_sandboxed || self.allow_same_origin {
+            parent_origin.clone()
+        } else {
+            Origin::Opaque(format!("sandboxed-iframe-{}", fast_hash(&parent_origin.to_string_repr())))
+        }
+    }
+
+    pub fn allows_scripts(&self) -> bool {
+        !self.is_sandboxed || self.allow_scripts
     }
 }
 
@@ -499,5 +660,78 @@ mod tests {
             }
             _ => panic!("Unexpected message"),
         }
+    }
+
+    #[test]
+    fn site_isolation_and_process_mapping() {
+        let mut sim = SiteIsolationManager::new();
+
+        let o_mail = Origin::parse("https://mail.google.com").unwrap();
+        let o_drive = Origin::parse("https://drive.google.com").unwrap();
+        let o_github = Origin::parse("https://github.com").unwrap();
+
+        let pid_mail = sim.get_or_assign_process_id(&o_mail);
+        let pid_drive = sim.get_or_assign_process_id(&o_drive);
+        let pid_github = sim.get_or_assign_process_id(&o_github);
+
+        // Same site (google.com) gets same process
+        assert_eq!(pid_mail, pid_drive);
+        // Different site (github.com) gets isolated process
+        assert_ne!(pid_mail, pid_github);
+        assert!(sim.are_sites_isolated(&o_mail, &o_github));
+        assert!(!sim.are_sites_isolated(&o_mail, &o_drive));
+    }
+
+    #[test]
+    fn iframe_sandbox_policy_enforcement() {
+        let parent_origin = Origin::parse("https://trusted.com").unwrap();
+
+        // 1. Unsandboxed iframe
+        let unsandboxed = IframeSandboxPolicy::parse(None);
+        assert!(!unsandboxed.is_sandboxed);
+        assert!(unsandboxed.allows_scripts());
+        assert_eq!(unsandboxed.effective_origin(&parent_origin), parent_origin);
+
+        // 2. Sandboxed iframe without allow-scripts or allow-same-origin
+        let strict_sandbox = IframeSandboxPolicy::parse(Some(""));
+        assert!(strict_sandbox.is_sandboxed);
+        assert!(!strict_sandbox.allows_scripts());
+        let eff = strict_sandbox.effective_origin(&parent_origin);
+        assert!(eff.is_opaque());
+        assert!(!eff.is_same_origin(&parent_origin));
+
+        // 3. Sandboxed iframe with allow-scripts but no allow-same-origin
+        let script_only = IframeSandboxPolicy::parse(Some("allow-scripts"));
+        assert!(script_only.allows_scripts());
+        assert!(script_only.effective_origin(&parent_origin).is_opaque());
+    }
+
+    #[test]
+    fn render_host_crash_recovery_and_respawn() {
+        let (_b_ep, r_ep) = IpcChannel::create_pair();
+        let origin = Origin::parse("https://crash-test.com").unwrap();
+        let mut host = IsolatedRenderHost::new(101, origin.clone(), r_ep);
+
+        assert!(!host.is_crashed());
+        assert_eq!(host.status, ProcessStatus::Running);
+
+        // Simulate crash
+        host.simulate_crash();
+        assert!(host.is_crashed());
+        assert_eq!(host.status, ProcessStatus::Crashed);
+
+        // Attempting to send resource request while crashed fails
+        assert!(host.request_resource(1, "https://crash-test.com/data").is_err());
+
+        // Check Sad Tab crash screen
+        let sad_tab = IsolatedRenderHost::generate_sad_tab_html();
+        assert!(sad_tab.contains("Aw, Snap!"));
+        assert!(sad_tab.contains("RESULT_CODE_KILLED_BAD_MESSAGE"));
+
+        // Respawn host
+        let (_b_ep2, r_ep2) = IpcChannel::create_pair();
+        host.respawn(r_ep2);
+        assert!(!host.is_crashed());
+        assert_eq!(host.status, ProcessStatus::Running);
     }
 }

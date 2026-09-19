@@ -1231,9 +1231,11 @@ dependencies = [
  "wavecore-html",
  "wavecore-js",
  "wavecore-layout",
+ "wavecore-media",
  "wavecore-net",
  "wavecore-pixels",
  "wavecore-render",
+ "wavecore-sandbox",
  "wavecore-storage",
  "wavecore-style",
  "wavecore-window",
@@ -1270,6 +1272,14 @@ dependencies = [
  "wavecore-dom",
  "wavecore-style",
  "wavecore-text",
+]
+
+[[package]]
+name = "wavecore-media"
+version = "0.1.0"
+dependencies = [
+ "wavecore-dom",
+ "wavecore-pixels",
 ]
 
 [[package]]

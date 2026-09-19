@@ -245,3 +245,39 @@ fn test_web_apis_timers_and_fetch() {
 
     assert_eq!(res, JsValue::Boolean(true));
 }
+
+#[test]
+fn test_canvas_and_webgl_apis() {
+    let mut canvas_node = Node::element("canvas", vec![]);
+    if let wavecore_dom::NodeType::Element(e) = &mut canvas_node.node_type {
+        e.set_attribute("id", "myCanvas");
+        e.set_attribute("width", "300");
+        e.set_attribute("height", "150");
+    }
+    let doc = Node::document(vec![canvas_node]);
+    let root = Rc::new(RefCell::new(doc));
+    let bridge = DomBridge::new(root);
+    let mut vm = VM::new();
+    bridge.attach_to_vm(&mut vm);
+
+    let script = r##"
+        let canvas = document.getElementById("myCanvas");
+        let ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#FF0000";
+        ctx.fillRect(10, 10, 50, 50);
+
+        let gl = canvas.getContext("webgl");
+        let shader = gl.createShader(35633);
+        let prog = gl.createProgram();
+
+        ctx.isCanvas2D == true && gl.isWebGL == true && gl.TRIANGLES == 4;
+    "##;
+
+    let tokens = wavecore_js::lexer::Lexer::new(script).tokenize().unwrap();
+    let stmts = wavecore_js::parser::Parser::new(tokens).parse().unwrap();
+    let chunks = wavecore_js::bytecode::Compiler::new().compile(&stmts).unwrap();
+    let res = vm.execute(chunks).unwrap();
+
+    assert_eq!(res, JsValue::Boolean(true));
+}
+

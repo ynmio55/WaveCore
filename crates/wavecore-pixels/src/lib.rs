@@ -148,6 +148,15 @@ impl Surface {
                     DisplayCommand::Image { rect, src } => {
                         self.draw_image(src, rect.x + offset_x, rect.y + offset_y, rect.width, rect.height);
                     }
+                    DisplayCommand::DrawLine { x1, y1, x2, y2, color, width } => {
+                        let col = parse_color(color).unwrap_or(Rgba(0, 0, 0, 255));
+                        self.draw_line(x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y, col, *width);
+                    }
+                    DisplayCommand::DrawCircle { cx, cy, radius, fill, stroke } => {
+                        let fill_col = fill.as_deref().and_then(parse_color);
+                        let stroke_col = stroke.as_ref().and_then(|(col, w)| parse_color(col).map(|c| (c, *w)));
+                        self.draw_circle(cx + offset_x, cy + offset_y, *radius, fill_col, stroke_col);
+                    }
                 }
             }
 
@@ -188,6 +197,15 @@ impl Surface {
                 }
                 DisplayCommand::Image { rect, src } => {
                     self.draw_image(src, rect.x + offset_x, rect.y + offset_y, rect.width, rect.height);
+                }
+                DisplayCommand::DrawLine { x1, y1, x2, y2, color, width } => {
+                    let col = parse_color(color).unwrap_or(Rgba(0, 0, 0, 255));
+                    self.draw_line(x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y, col, *width);
+                }
+                DisplayCommand::DrawCircle { cx, cy, radius, fill, stroke } => {
+                    let fill_col = fill.as_deref().and_then(parse_color);
+                    let stroke_col = stroke.as_ref().and_then(|(col, w)| parse_color(col).map(|c| (c, *w)));
+                    self.draw_circle(cx + offset_x, cy + offset_y, *radius, fill_col, stroke_col);
                 }
             }
         }
@@ -343,6 +361,62 @@ impl Surface {
         }
     }
 
+    pub fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, color: Rgba, width: f32) {
+        if width <= 0.0 {
+            return;
+        }
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let steps = (distance * 2.0).max(1.0) as usize;
+        let half_w = width * 0.5;
+
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let px = x1 + dx * t;
+            let py = y1 + dy * t;
+            if width <= 1.5 {
+                self.blend_pixel(px.round() as i32, py.round() as i32, color, color.3);
+            } else {
+                self.fill_rect(px - half_w, py - half_w, width, width, color);
+            }
+        }
+    }
+
+    pub fn draw_circle(&mut self, cx: f32, cy: f32, radius: f32, fill: Option<Rgba>, stroke: Option<(Rgba, f32)>) {
+        if radius <= 0.0 {
+            return;
+        }
+        let extra = stroke.as_ref().map(|(_, w)| *w * 0.5).unwrap_or(0.0) + 1.0;
+        let min_x = ((cx - radius - extra).max(0.0) as i32).min(self.width as i32);
+        let max_x = ((cx + radius + extra + 1.0).max(0.0) as i32).min(self.width as i32);
+        let min_y = ((cy - radius - extra).max(0.0) as i32).min(self.height as i32);
+        let max_y = ((cy + radius + extra + 1.0).max(0.0) as i32).min(self.height as i32);
+
+        let (stroke_color, stroke_half_w) = stroke.map(|(c, w)| (c, (w.max(1.0) * 0.5))).unzip();
+
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let dx = px as f32 + 0.5 - cx;
+                let dy = py as f32 + 0.5 - cy;
+                let d = (dx * dx + dy * dy).sqrt();
+
+                if let (Some(sc), Some(hw)) = (stroke_color, stroke_half_w) {
+                    if (d - radius).abs() <= hw {
+                        self.blend_pixel(px, py, sc, sc.3);
+                        continue;
+                    }
+                }
+
+                if let Some(fc) = fill {
+                    if d <= radius {
+                        self.blend_pixel(px, py, fc, fc.3);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn to_u32_buffer(&self) -> Vec<u32> {
         self.pixels
             .iter()
@@ -406,6 +480,18 @@ pub fn command_bounds(cmd: &DisplayCommand) -> Option<Rect> {
         DisplayCommand::Border { rect, .. } => Some(*rect),
         DisplayCommand::Text { rect, .. } => Some(*rect),
         DisplayCommand::Image { rect, .. } => Some(*rect),
+        DisplayCommand::DrawLine { x1, y1, x2, y2, width, .. } => {
+            let min_x = x1.min(*x2) - width * 0.5;
+            let min_y = y1.min(*y2) - width * 0.5;
+            let max_x = x1.max(*x2) + width * 0.5;
+            let max_y = y1.max(*y2) + width * 0.5;
+            Some(Rect { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y })
+        }
+        DisplayCommand::DrawCircle { cx, cy, radius, stroke, .. } => {
+            let extra = stroke.as_ref().map(|(_, w)| *w * 0.5).unwrap_or(0.0);
+            let r = radius + extra;
+            Some(Rect { x: cx - r, y: cy - r, width: r * 2.0, height: r * 2.0 })
+        }
         DisplayCommand::PushClip(_) | DisplayCommand::PopClip => None,
     }
 }
@@ -462,5 +548,23 @@ mod tests {
         assert_eq!(surface.pixels[10 * 100 + 10], Rgba(255, 255, 255, 255));
         // (70, 70) WAS painted green because it intersects damage rect
         assert_eq!(surface.pixels[70 * 100 + 70], Rgba(0, 255, 0, 255));
+    }
+
+    #[test]
+    fn test_vector_primitives_line_and_circle() {
+        let mut surface = Surface::new(100, 100);
+        surface.clear(Rgba(255, 255, 255, 255));
+
+        // Draw a red diagonal line from (10, 10) to (30, 30)
+        surface.draw_line(10.0, 10.0, 30.0, 30.0, Rgba(255, 0, 0, 255), 2.0);
+        assert_eq!(surface.pixels[10 * 100 + 10], Rgba(255, 0, 0, 255));
+        assert_eq!(surface.pixels[20 * 100 + 20], Rgba(255, 0, 0, 255));
+
+        // Draw a blue circle at (60, 60) with radius 15
+        surface.draw_circle(60.0, 60.0, 15.0, Some(Rgba(0, 0, 255, 255)), None);
+        // Center should be blue
+        assert_eq!(surface.pixels[60 * 100 + 60], Rgba(0, 0, 255, 255));
+        // Outside circle should be white
+        assert_eq!(surface.pixels[90 * 100 + 90], Rgba(255, 255, 255, 255));
     }
 }

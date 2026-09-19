@@ -6,6 +6,8 @@ pub enum DisplayCommand {
     Border { rect: Rect, widths: Edges, color: String },
     Text { text: String, rect: Rect, font_size: f32, line_height: f32, color: String },
     Image { rect: Rect, src: String },
+    DrawLine { x1: f32, y1: f32, x2: f32, y2: f32, color: String, width: f32 },
+    DrawCircle { cx: f32, cy: f32, radius: f32, fill: Option<String>, stroke: Option<(String, f32)> },
     PushClip(Rect),
     PopClip,
 }

@@ -131,6 +131,12 @@ impl CorsPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsPolicy {
+    Strict,
+    Permissive,
+}
+
 #[derive(Debug)]
 pub enum NetError {
     Network(String),
@@ -138,6 +144,7 @@ pub enum NetError {
     InvalidUrl(String),
     TooManyRedirects(usize),
     Cors(String),
+    CertificateInvalid(String),
 }
 
 impl std::fmt::Display for NetError {
@@ -148,17 +155,36 @@ impl std::fmt::Display for NetError {
             NetError::InvalidUrl(s) => write!(f, "Invalid URL: {s}"),
             NetError::TooManyRedirects(n) => write!(f, "Exceeded maximum redirect limit ({n})"),
             NetError::Cors(s) => write!(f, "{s}"),
+            NetError::CertificateInvalid(s) => write!(f, "SSL/TLS certificate error: {s}"),
         }
     }
 }
 
 impl std::error::Error for NetError {}
 
+pub fn generate_ssl_error_page(url: &str, reason: &str) -> HttpResponse {
+    let body = format!(
+        "<!DOCTYPE html><html><head><title>Privacy Error - WaveCore</title><style>body{{background:#0F172A;color:#F8FAFC;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}}.box{{max-width:540px;padding:36px;background:#1E293B;border-radius:12px;border:1px solid #EF4444;}}h1{{color:#EF4444;font-size:24px;margin-bottom:12px;}}p{{color:#94A3B8;font-size:14px;line-height:1.6;}}code{{color:#F87171;background:#0F172A;padding:2px 6px;border-radius:4px;}}</style></head><body><div class=\"box\"><h1>Your connection is not private</h1><p>Attackers might be trying to steal your information from <b>{}</b>.<br>Reason: <code>{}</code></p><p>WaveCore prevented access to protect your passwords, cookies, and credit cards.</p></div></body></html>",
+        url, reason
+    );
+    let mut headers = HashMap::new();
+    headers.insert("content-type".to_string(), "text/html; charset=utf-8".to_string());
+    HttpResponse::new(
+        url.to_string(),
+        495,
+        "SSL Certificate Error".to_string(),
+        headers,
+        body.into_bytes(),
+        "text/html; charset=utf-8".to_string(),
+    )
+}
+
 pub struct NetworkClient {
     pub cookie_jar: CookieJar,
     pub cache: HttpCache,
     pub user_agent: String,
     pub max_redirects: usize,
+    pub tls_policy: TlsPolicy,
 }
 
 impl Default for NetworkClient {
@@ -168,6 +194,7 @@ impl Default for NetworkClient {
             cache: HttpCache::new(),
             user_agent: "WaveCore/0.2 (Production Engine Prototype; Linux/x86_64)".to_string(),
             max_redirects: 10,
+            tls_policy: TlsPolicy::Strict,
         }
     }
 }
@@ -605,5 +632,13 @@ mod tests {
         // Mismatched origin
         headers.insert("access-control-allow-origin".to_string(), "https://other.com".to_string());
         assert!(CorsPolicy::check(Some(&origin_a), &origin_b, &headers).is_err());
+    }
+
+    #[test]
+    fn ssl_error_page_generation() {
+        let resp = generate_ssl_error_page("https://untrusted.com", "CERT_COMMON_NAME_INVALID");
+        assert_eq!(resp.status_code, 495);
+        assert!(resp.text().contains("Your connection is not private"));
+        assert!(resp.text().contains("CERT_COMMON_NAME_INVALID"));
     }
 }
