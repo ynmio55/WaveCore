@@ -95,4 +95,44 @@ mod tests {
 
         assert_eq!(root.borrow().inner_text(), "Updated by Pulse JS");
     }
+    #[test]
+    fn dom_bridge_timer_runs_on_event_loop() {
+        let root = Rc::new(RefCell::new(Node::document(vec![])));
+        let bridge = DomBridge::new(root);
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        eval_script(
+            r#"setTimeout(function() { console.log("timer-fired"); }, 0);"#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(bridge.dispatch_due_timers(&mut vm), 1);
+        assert!(vm.console_output.iter().any(|line| line == "timer-fired"));
+    }
+
+    #[test]
+    fn fetch_response_exposes_real_status() {
+        let root = Rc::new(RefCell::new(Node::document(vec![])));
+        let bridge = DomBridge::with_url(root, "https://wavecore.local/");
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        let result = eval_script(
+            r#"
+                let observed = 0;
+                fetch("data:text/plain,hello").then(function(response) {
+                    observed = response.status;
+                    return observed;
+                });
+                observed;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(result, JsValue::Number(200.0));
+    }
+
 }
