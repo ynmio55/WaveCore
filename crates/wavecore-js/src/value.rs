@@ -142,9 +142,16 @@ pub enum PromiseState {
 }
 
 #[derive(Clone)]
+pub struct PromiseReaction {
+    pub on_fulfilled: Option<JsValue>,
+    pub on_rejected: Option<JsValue>,
+    pub child: Rc<RefCell<JsPromise>>,
+}
+
+#[derive(Clone)]
 pub struct JsPromise {
     pub state: PromiseState,
-    pub then_callbacks: Vec<(JsValue, Option<JsValue>)>, // (on_fulfilled, on_rejected)
+    pub then_callbacks: Vec<PromiseReaction>,
 }
 
 impl JsPromise {
