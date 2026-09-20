@@ -488,4 +488,40 @@ mod tests {
         assert!(err.contains("microtask checkpoint exceeded configured limit"));
     }
 
+    #[test]
+    fn arraybuffer_typed_arrays_share_real_backing_store() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let buffer = new ArrayBuffer(8);
+                let bytes = new Uint8Array(buffer);
+                bytes[0] = 255;
+                bytes[1] = 1;
+                let words = new Uint16Array(buffer);
+                let view = bytes.subarray(0, 2);
+                view[1] = 2;
+                buffer.byteLength + bytes.byteLength + words.length + words[0];
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::Number(531.0));
+    }
+
+    #[test]
+    fn typed_array_set_and_array_from_use_backing_values() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let data = new Uint16Array(4);
+                data.set([10, 20, 30], 1);
+                let copy = Array.from(data);
+                copy[1] + copy[2] + copy[3] + data.length;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::Number(64.0));
+    }
+
 }
