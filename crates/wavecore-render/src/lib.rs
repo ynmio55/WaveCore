@@ -1,4 +1,11 @@
+use std::collections::HashMap;
 use wavecore_layout::{Edges, LayoutBox, Rect};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Canvas2DCommand {
+    FillRect { x: f32, y: f32, width: f32, height: f32, color: String },
+    StrokeRect { x: f32, y: f32, width: f32, height: f32, color: String, line_width: f32 },
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {
@@ -137,6 +144,66 @@ fn walk_self(b: &LayoutBox, v: &mut Vec<DisplayCommand>) {
 
     if is_clipped {
         v.push(DisplayCommand::PopClip);
+    }
+}
+
+
+pub fn append_canvas_commands(
+    layout: &LayoutBox,
+    registry: &HashMap<u64, Vec<Canvas2DCommand>>,
+    out: &mut Vec<DisplayCommand>,
+) {
+    if layout.is_canvas {
+        if let Some(node_id) = layout.node_id {
+            if let Some(commands) = registry.get(&node_id.0) {
+                out.push(DisplayCommand::PushClip(layout.content));
+                for command in commands {
+                    match command {
+                        Canvas2DCommand::FillRect { x, y, width, height, color } => {
+                            out.push(DisplayCommand::FillRect {
+                                rect: Rect {
+                                    x: layout.content.x + *x,
+                                    y: layout.content.y + *y,
+                                    width: *width,
+                                    height: *height,
+                                },
+                                color: color.clone(),
+                            });
+                        }
+                        Canvas2DCommand::StrokeRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            color,
+                            line_width,
+                        } => {
+                            let w = line_width.max(1.0);
+                            out.push(DisplayCommand::Border {
+                                rect: Rect {
+                                    x: layout.content.x + *x,
+                                    y: layout.content.y + *y,
+                                    width: *width,
+                                    height: *height,
+                                },
+                                widths: Edges {
+                                    top: w,
+                                    right: w,
+                                    bottom: w,
+                                    left: w,
+                                },
+                                color: color.clone(),
+                                radius: 0.0,
+                            });
+                        }
+                    }
+                }
+                out.push(DisplayCommand::PopClip);
+            }
+        }
+    }
+    for child in &layout.children {
+        append_canvas_commands(child, registry, out);
     }
 }
 
