@@ -119,7 +119,8 @@ fn layout_and_render(
     let sheet = wavecore_css::parse(css);
     let styled = wavecore_style::style_tree(dom, &sheet);
     let layout = wavecore_layout::layout(&styled, width);
-    let display_list = wavecore_render::build_display_list(&layout);
+    let compositor_frame = wavecore_render::build_compositor_frame(&layout);
+    let display_list = compositor_frame.flatten();
     (layout, display_list)
 }
 
