@@ -133,8 +133,19 @@ impl CspDirective {
                         return true;
                     }
                 }
+                if let Some(scheme_source) = val.strip_suffix(':') {
+                    if !scheme_source.contains('/') && scheme_source == target_url_parsed.scheme() {
+                        return true;
+                    }
+                }
                 if let Some(domain) = val.strip_prefix("*.") {
-                    if target_host.ends_with(domain) {
+                    let target_host = target_host.to_ascii_lowercase();
+                    let domain = domain.to_ascii_lowercase();
+                    if target_host
+                        .strip_suffix(&domain)
+                        .map(|prefix| prefix.ends_with('.') && !prefix.is_empty())
+                        .unwrap_or(false)
+                    {
                         return true;
                     }
                 }
@@ -243,6 +254,22 @@ impl PermissionManager {
 
     pub fn set_permission(&mut self, origin: Origin, perm: Permission, state: PermissionState) {
         self.permissions.insert((origin, perm), state);
+    }
+}
+
+pub fn validate_brokered_resource_url(url: &str) -> Result<Url, String> {
+    let parsed = Url::parse(url).map_err(|e| format!("SecurityError: invalid resource URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {
+            if parsed.host_str().is_none() {
+                return Err("SecurityError: network resource URL has no host".to_string());
+            }
+            Ok(parsed)
+        }
+        "data" => Ok(parsed),
+        scheme => Err(format!(
+            "SecurityError: renderer resource scheme '{scheme}' is not allowed through the network broker"
+        )),
     }
 }
 
@@ -393,6 +420,7 @@ impl IsolatedRenderHost {
         if self.status != ProcessStatus::Running {
             return Err("Render process is not running".to_string());
         }
+        validate_brokered_resource_url(url)?;
         // A sandboxed renderer must not open the network itself. Resource loads are
         // intentionally brokered to the browser endpoint, which can apply cookies,
         // CORS, cache policy, permissions, and auditing before returning ResourceData.
@@ -734,4 +762,51 @@ mod tests {
         assert!(!host.is_crashed());
         assert_eq!(host.status, ProcessStatus::Running);
     }
+    #[test]
+    fn csp_wildcards_require_real_subdomains_and_support_scheme_sources() {
+        let origin = Origin::parse("https://app.example.com").unwrap();
+        let csp = ContentSecurityPolicy::parse(
+            "script-src https: *.example.com",
+        );
+        assert!(csp.allows_script(
+            &origin,
+            Some("https://cdn.example.com/app.js"),
+            false
+        ));
+        assert!(csp.allows_script(
+            &origin,
+            Some("https://other.net/app.js"),
+            false
+        ));
+        assert!(!csp.allows_script(
+            &origin,
+            Some("http://evil-example.com/app.js"),
+            false
+        ));
+
+        let wildcard_only = ContentSecurityPolicy::parse("script-src *.example.com");
+        assert!(!wildcard_only.allows_script(
+            &origin,
+            Some("https://evil-example.com/app.js"),
+            false
+        ));
+        assert!(wildcard_only.allows_script(
+            &origin,
+            Some("https://static.example.com/app.js"),
+            false
+        ));
+    }
+
+    #[test]
+    fn renderer_broker_rejects_privileged_resource_schemes() {
+        let (_browser, renderer) = IpcChannel::create_pair();
+        let origin = Origin::parse("https://wavecore.dev").unwrap();
+        let host = IsolatedRenderHost::new(9, origin, renderer);
+
+        assert!(host.request_resource(1, "file:///etc/passwd").is_err());
+        assert!(host.request_resource(2, "javascript:alert(1)").is_err());
+        assert!(host.request_resource(3, "https://cdn.wavecore.dev/app.js").is_ok());
+        assert!(host.request_resource(4, "data:text/plain,hello").is_ok());
+    }
+
 }
