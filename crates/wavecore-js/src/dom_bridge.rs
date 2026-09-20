@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use wavecore_dom::Node;
 use wavecore_net::NetworkClient;
 use wavecore_sandbox::Origin;
+use wavecore_render::Canvas2DCommand;
 
 use crate::value::{JsObject, JsPromise, JsValue};
 use crate::vm::VM;
@@ -25,6 +26,7 @@ pub struct DomBridge {
     pub history_stack: Rc<RefCell<Vec<String>>>,
     timer_callbacks: Rc<RefCell<HashMap<usize, TimerEntry>>>,
     network_client: Rc<RefCell<NetworkClient>>,
+    canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
 }
 
 impl DomBridge {
@@ -36,6 +38,7 @@ impl DomBridge {
             history_stack: Rc::new(RefCell::new(vec!["https://wavecore.local/".to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
             network_client: Rc::new(RefCell::new(NetworkClient::new())),
+            canvas_commands: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -55,10 +58,16 @@ impl DomBridge {
             history_stack: Rc::new(RefCell::new(vec![url.to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
             network_client,
+            canvas_commands: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
+    pub fn canvas_commands_snapshot(&self) -> HashMap<u64, Vec<Canvas2DCommand>> {
+        self.canvas_commands.borrow().clone()
+    }
+
     pub fn attach_to_vm(&self, vm: &mut VM) {
+        let canvas_commands_ref = self.canvas_commands.clone();
         let root_ref = self.root.clone();
         let listeners_ref = self.listeners.clone();
         let url_ref = self.current_url.clone();
@@ -76,7 +85,7 @@ impl DomBridge {
                 let id = args.first().map(|a| a.to_js_string()).unwrap_or_default();
                 let borrowed = r1.borrow();
                 if let Some(_node) = borrowed.find_by_id(&id) {
-                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone());
+                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone(), canvas_commands_ref.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -104,7 +113,7 @@ impl DomBridge {
                     } else {
                         "".to_string()
                     };
-                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone());
+                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone(), canvas_commands_ref.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -146,6 +155,7 @@ impl DomBridge {
                         &html_id,
                         r_all.clone(),
                         l_all.clone(),
+                        canvas_commands_ref.clone(),
                     ));
                 }
 
@@ -168,7 +178,7 @@ impl DomBridge {
                 // Store in root children temporarily as detached node
                 r_create.borrow_mut().append_child(new_node);
 
-                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone());
+                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone(), canvas_commands_ref.clone());
                 Ok(elem)
             }),
         );
@@ -526,6 +536,7 @@ fn create_element_wrapper(
     id: &str,
     root: Rc<RefCell<Node>>,
     listeners: Rc<RefCell<HashMap<(String, String), Vec<JsValue>>>>,
+    canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
 ) -> JsValue {
     let mut elem_obj = JsObject::new();
     let elem_id = id.to_string();
@@ -760,12 +771,17 @@ fn create_element_wrapper(
     );
 
     // getContext(type) for canvas elements
+    let canvas_registry = canvas_commands.clone();
+    let canvas_node_id = internal_node_id;
     elem_obj.set(
         "getContext",
         JsValue::native("getContext", move |_vm, args| {
             let ctx_name = args.first().map(|a| a.to_js_string()).unwrap_or_else(|| "2d".to_string());
             if ctx_name == "2d" {
-                Ok(JsValue::Object(Rc::new(RefCell::new(create_canvas_2d_context()))))
+                Ok(JsValue::Object(Rc::new(RefCell::new(create_canvas_2d_context(
+                    canvas_node_id,
+                    canvas_registry.clone(),
+                )))))
             } else if ctx_name == "webgl" || ctx_name == "experimental-webgl" {
                 Ok(JsValue::Object(Rc::new(RefCell::new(create_webgl_context()))))
             } else {
@@ -791,16 +807,94 @@ fn create_element_wrapper(
     JsValue::Object(Rc::new(RefCell::new(elem_obj)))
 }
 
-fn create_canvas_2d_context() -> JsObject {
+fn create_canvas_2d_context(
+    node_id: u64,
+    registry: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
+) -> JsObject {
     let mut ctx = JsObject::new();
+    let fill_style = Rc::new(RefCell::new("#000000".to_string()));
+    let stroke_style = Rc::new(RefCell::new("#000000".to_string()));
+    let line_width = Rc::new(Cell::new(1.0f32));
+
     ctx.set("fillStyle", JsValue::String("#000000".to_string()));
     ctx.set("strokeStyle", JsValue::String("#000000".to_string()));
     ctx.set("lineWidth", JsValue::Number(1.0));
     ctx.set("isCanvas2D", JsValue::Boolean(true));
 
-    ctx.set("fillRect", JsValue::native("fillRect", |_vm, _args| Ok(JsValue::Undefined)));
+    let fs = fill_style.clone();
+    ctx.set(
+        "setFillStyle",
+        JsValue::native("setFillStyle", move |_vm, args| {
+            *fs.borrow_mut() = args.first().map(|v| v.to_js_string()).unwrap_or_else(|| "#000000".into());
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let ss = stroke_style.clone();
+    ctx.set(
+        "setStrokeStyle",
+        JsValue::native("setStrokeStyle", move |_vm, args| {
+            *ss.borrow_mut() = args.first().map(|v| v.to_js_string()).unwrap_or_else(|| "#000000".into());
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let lw = line_width.clone();
+    ctx.set(
+        "setLineWidth",
+        JsValue::native("setLineWidth", move |_vm, args| {
+            lw.set(args.first().map(|v| v.to_number() as f32).unwrap_or(1.0).max(1.0));
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let reg_fill = registry.clone();
+    let fill_style_ref = fill_style.clone();
+    ctx.set(
+        "fillRect",
+        JsValue::native("fillRect", move |_vm, args| {
+            let x = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let y = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let width = args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let height = args.get(3).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            reg_fill.borrow_mut().entry(node_id).or_default().push(
+                Canvas2DCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: fill_style_ref.borrow().clone(),
+                },
+            );
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let reg_stroke = registry.clone();
+    let stroke_style_ref = stroke_style.clone();
+    let line_width_ref = line_width.clone();
+    ctx.set(
+        "strokeRect",
+        JsValue::native("strokeRect", move |_vm, args| {
+            let x = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let y = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let width = args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let height = args.get(3).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            reg_stroke.borrow_mut().entry(node_id).or_default().push(
+                Canvas2DCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: stroke_style_ref.borrow().clone(),
+                    line_width: line_width_ref.get(),
+                },
+            );
+            Ok(JsValue::Undefined)
+        }),
+    );
+
     ctx.set("clearRect", JsValue::native("clearRect", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("strokeRect", JsValue::native("strokeRect", |_vm, _args| Ok(JsValue::Undefined)));
     ctx.set("beginPath", JsValue::native("beginPath", |_vm, _args| Ok(JsValue::Undefined)));
     ctx.set("moveTo", JsValue::native("moveTo", |_vm, _args| Ok(JsValue::Undefined)));
     ctx.set("lineTo", JsValue::native("lineTo", |_vm, _args| Ok(JsValue::Undefined)));
