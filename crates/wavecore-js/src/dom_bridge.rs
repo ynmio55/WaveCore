@@ -127,13 +127,14 @@ impl DomBridge {
         let l1 = listeners_ref.clone();
         let c1 = canvas_commands_ref.clone();
         let w1 = webgl_commands_ref.clone();
+        let m1 = mutation_observers_ref.clone();
         document.set(
             "getElementById",
             JsValue::native("getElementById", move |_vm, args| {
                 let id = args.first().map(|a| a.to_js_string()).unwrap_or_default();
                 let borrowed = r1.borrow();
                 if let Some(_node) = borrowed.find_by_id(&id) {
-                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone(), c1.clone(), w1.clone(), mutation_observers_ref.clone());
+                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone(), c1.clone(), w1.clone(), m1.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -146,6 +147,7 @@ impl DomBridge {
         let l2 = listeners_ref.clone();
         let c2 = canvas_commands_ref.clone();
         let w2 = webgl_commands_ref.clone();
+        let m2 = mutation_observers_ref.clone();
         document.set(
             "querySelector",
             JsValue::native("querySelector", move |_vm, args| {
@@ -163,7 +165,7 @@ impl DomBridge {
                     } else {
                         "".to_string()
                     };
-                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone(), c2.clone(), w2.clone(), mutation_observers_ref.clone());
+                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone(), c2.clone(), w2.clone(), m2.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -176,6 +178,7 @@ impl DomBridge {
         let l_all = listeners_ref.clone();
         let c_all = canvas_commands_ref.clone();
         let w_all = webgl_commands_ref.clone();
+        let m_all = mutation_observers_ref.clone();
         document.set(
             "querySelectorAll",
             JsValue::native("querySelectorAll", move |_vm, args| {
@@ -209,7 +212,7 @@ impl DomBridge {
                         l_all.clone(),
                         c_all.clone(),
                         w_all.clone(),
-                        mutation_observers_ref.clone(),
+                        m_all.clone(),
                     ));
                 }
 
@@ -222,6 +225,7 @@ impl DomBridge {
         let l_create = listeners_ref.clone();
         let c_create = canvas_commands_ref.clone();
         let w_create = webgl_commands_ref.clone();
+        let m_create = mutation_observers_ref.clone();
         document.set(
             "createElement",
             JsValue::native("createElement", move |_vm, args| {
@@ -234,7 +238,7 @@ impl DomBridge {
                 // Store in root children temporarily as detached node
                 r_create.borrow_mut().append_child(new_node);
 
-                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone(), c_create.clone(), w_create.clone(), mutation_observers_ref.clone());
+                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone(), c_create.clone(), w_create.clone(), m_create.clone());
                 Ok(elem)
             }),
         );
