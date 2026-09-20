@@ -68,6 +68,7 @@ impl DomBridge {
             current_url: Rc::new(RefCell::new(url.to_string())),
             history_stack: Rc::new(RefCell::new(vec![url.to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
+            time_origin: Rc::new(Instant::now()),
             network_client,
             canvas_commands: Rc::new(RefCell::new(HashMap::new())),
             webgl_commands: Rc::new(RefCell::new(HashMap::new())),
