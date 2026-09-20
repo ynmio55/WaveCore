@@ -19,6 +19,11 @@ pub enum WebGlCommand {
         size: u32,
         stride_floats: u32,
         offset_floats: u32,
+        buffer_id: Option<u32>,
+    },
+    VertexAttrib4f {
+        index: u32,
+        value: [f32; 4],
     },
     EnableVertexAttribArray(u32),
     UseProgram(Option<u32>),
