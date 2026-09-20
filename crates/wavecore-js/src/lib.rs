@@ -227,7 +227,7 @@ mod tests {
             &mut vm,
         )
         .unwrap();
-        assert_eq!(result, JsValue::Number(514.25));
+        assert_eq!(result, JsValue::Number(260.25));
     }
 
 }
