@@ -153,4 +153,44 @@ mod tests {
         assert_eq!(res, JsValue::Number(50.0));
     }
 
+    #[test]
+    fn webgl_records_real_buffer_and_draw_commands() {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("id".to_string(), "glcanvas".to_string());
+        let canvas = Node::element_with_attributes("canvas", attrs, vec![]);
+        let root = Rc::new(RefCell::new(Node::document(vec![canvas])));
+        let bridge = DomBridge::new(root);
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        eval_script(
+            r#"
+                let canvas = document.getElementById("glcanvas");
+                let gl = canvas.getContext("webgl");
+                let buffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                gl.bufferData(gl.ARRAY_BUFFER, [-1, -1, 1, -1, 0, 1], gl.STATIC_DRAW);
+                gl.enableVertexAttribArray(0);
+                gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+                gl.clearColor(0.1, 0.2, 0.3, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        let commands = bridge.webgl_commands_snapshot();
+        let stream = commands.values().next().expect("webgl command stream");
+        assert!(stream.iter().any(|c| matches!(
+            c,
+            wavecore_render::WebGlCommand::UploadArrayBuffer { data, .. } if data.len() == 6
+        )));
+        assert!(stream.iter().any(|c| matches!(
+            c,
+            wavecore_render::WebGlCommand::DrawArrays { mode, count, .. }
+                if *mode == 4 && *count == 3
+        )));
+    }
+
 }
