@@ -387,4 +387,51 @@ mod tests {
         assert_eq!(result, JsValue::Number(42.0));
     }
 
+    #[test]
+    fn canvas_path_records_lines_and_circles() {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("id".to_string(), "paint".to_string());
+        let canvas = Node::element_with_attributes("canvas", attrs, vec![]);
+        let root = Rc::new(RefCell::new(Node::document(vec![canvas])));
+        let bridge = DomBridge::new(root);
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        eval_script(
+            r#"
+                let canvas = document.getElementById("paint");
+                let ctx = canvas.getContext("2d");
+                ctx.setStrokeStyle("#ff0000");
+                ctx.setLineWidth(3);
+                ctx.beginPath();
+                ctx.moveTo(10, 20);
+                ctx.lineTo(30, 40);
+                ctx.arc(50, 60, 12, 0, 6.28318);
+                ctx.stroke();
+                ctx.setFillStyle("#00ff00");
+                ctx.fill();
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        let commands = bridge.canvas_commands_snapshot();
+        let stream = commands.values().next().expect("canvas command stream");
+        assert!(stream.iter().any(|command| matches!(
+            command,
+            wavecore_render::Canvas2DCommand::DrawLine { x1, y1, x2, y2, line_width, .. }
+                if *x1 == 10.0 && *y1 == 20.0 && *x2 == 30.0 && *y2 == 40.0 && *line_width == 3.0
+        )));
+        assert!(stream.iter().any(|command| matches!(
+            command,
+            wavecore_render::Canvas2DCommand::StrokeCircle { cx, cy, radius, .. }
+                if *cx == 50.0 && *cy == 60.0 && *radius == 12.0
+        )));
+        assert!(stream.iter().any(|command| matches!(
+            command,
+            wavecore_render::Canvas2DCommand::FillCircle { cx, cy, radius, .. }
+                if *cx == 50.0 && *cy == 60.0 && *radius == 12.0
+        )));
+    }
+
 }
