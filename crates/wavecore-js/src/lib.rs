@@ -175,6 +175,10 @@ mod tests {
                 gl.clearColor(0.1, 0.2, 0.3, 1.0);
                 gl.clear(gl.COLOR_BUFFER_BIT);
                 gl.drawArrays(gl.TRIANGLES, 0, 3);
+                let ibo = gl.createBuffer();
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, [0, 1, 2], gl.STATIC_DRAW);
+                gl.drawElements(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, 0);
             "#,
             &mut vm,
         )
@@ -189,6 +193,16 @@ mod tests {
         assert!(stream.iter().any(|c| matches!(
             c,
             wavecore_render::WebGlCommand::DrawArrays { mode, count, .. }
+                if *mode == 4 && *count == 3
+        )));
+        assert!(stream.iter().any(|c| matches!(
+            c,
+            wavecore_render::WebGlCommand::UploadElementArrayBuffer { data, .. }
+                if data == &vec![0, 1, 2]
+        )));
+        assert!(stream.iter().any(|c| matches!(
+            c,
+            wavecore_render::WebGlCommand::DrawElements { mode, count, .. }
                 if *mode == 4 && *count == 3
         )));
     }
