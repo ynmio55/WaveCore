@@ -58,6 +58,9 @@ pub struct LayoutBox {
     pub margin: Edges,
     pub background: Option<String>,
     pub border_color: Option<String>,
+    pub border_radius: f32,
+    pub opacity: f32,
+    pub z_index: i32,
     pub color: Option<String>,
     pub text: Option<String>,
     pub text_lines: Vec<String>,
@@ -324,6 +327,9 @@ fn layout_at(
             margin: Edges::default(),
             background: None,
             border_color: None,
+            border_radius: 0.0,
+            opacity: 1.0,
+            z_index: 0,
             color: None,
             text: None,
             text_lines: vec![],
@@ -387,6 +393,9 @@ fn layout_at(
             margin: Edges::default(),
             background: None,
             border_color: None,
+            border_radius: 0.0,
+            opacity: 1.0,
+            z_index: 0,
             color: current_color,
             text: Some(text.clone()),
             text_lines: metrics.lines.into_iter().map(|l| l.text).collect(),
@@ -733,6 +742,22 @@ fn layout_at(
             }
         });
 
+    let border_radius = length(node.properties.get("border-radius"), rect.width.min(rect.height))
+        .unwrap_or(0.0)
+        .max(0.0)
+        .min(rect.width.min(rect.height) * 0.5);
+    let opacity = node
+        .properties
+        .get("opacity")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    let z_index = node
+        .properties
+        .get("z-index")
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .unwrap_or(0);
+
     LayoutBox {
         node_id: Some(node.node.node_id()),
         rect,
@@ -742,6 +767,9 @@ fn layout_at(
         margin,
         background: bg_color,
         border_color: b_color,
+        border_radius,
+        opacity,
+        z_index,
         color: node.properties.get("color").cloned().or_else(|| {
             if is_form_control {
                 Some("#e6edf3".to_string())
@@ -932,6 +960,21 @@ mod tests {
             500.0,
         );
         assert!((l.content.width - 480.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn visual_properties_are_preserved_for_renderer() {
+        let root = Node::element("div", vec![]);
+        let l = layout(
+            &style_tree(
+                &root,
+                &parse("div { width:100px; height:50px; border-radius:12px; opacity:0.5; z-index:7; }"),
+            ),
+            800.0,
+        );
+        assert!((l.border_radius - 12.0).abs() < 0.01);
+        assert!((l.opacity - 0.5).abs() < 0.01);
+        assert_eq!(l.z_index, 7);
     }
 
 }
