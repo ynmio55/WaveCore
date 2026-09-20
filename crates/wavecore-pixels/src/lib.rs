@@ -189,7 +189,29 @@ impl Surface {
                         let col = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
                         self.fill_rect(rect.x + offset_x, rect.y + offset_y, rect.width, rect.height, col);
                     }
-                    DisplayCommand::Border { rect, widths, color, radius: _ } => {
+                    DisplayCommand::FillRoundedRect { rect, radius, color } => {
+                        let col = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
+                        self.fill_rounded_rect(
+                            rect.x + offset_x,
+                            rect.y + offset_y,
+                            rect.width,
+                            rect.height,
+                            *radius,
+                            col,
+                        );
+                    }
+                    DisplayCommand::FillRoundedRect { rect, radius, color } => {
+                    let col = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
+                    self.fill_rounded_rect(
+                        rect.x + offset_x,
+                        rect.y + offset_y,
+                        rect.width,
+                        rect.height,
+                        *radius,
+                        col,
+                    );
+                }
+                DisplayCommand::Border { rect, widths, color, radius: _ } => {
                         let col = self.effective_color(parse_color(color).unwrap_or(Rgba(0, 0, 0, 255)));
                         let rx = rect.x + offset_x;
                         let ry = rect.y + offset_y;
@@ -240,6 +262,17 @@ impl Surface {
                 DisplayCommand::FillRect { rect, color } => {
                     let c = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
                     self.fill_rect(rect.x + offset_x, rect.y + offset_y, rect.width, rect.height, c);
+                }
+                DisplayCommand::FillRoundedRect { rect, radius, color } => {
+                    let col = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
+                    self.fill_rounded_rect(
+                        rect.x + offset_x,
+                        rect.y + offset_y,
+                        rect.width,
+                        rect.height,
+                        *radius,
+                        col,
+                    );
                 }
                 DisplayCommand::Border { rect, widths, color, radius: _ } => {
                     let c = self.effective_color(parse_color(color).unwrap_or(Rgba(0, 0, 0, 255)));
