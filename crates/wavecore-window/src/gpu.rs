@@ -548,6 +548,16 @@ fn build_webgl_draws(
 ) -> Vec<GpuWebGlDraw> {
     use wgpu::util::DeviceExt;
 
+    #[derive(Clone, Copy)]
+    struct AttribState {
+        buffer_id: Option<u32>,
+        size: usize,
+        stride: usize,
+        offset: usize,
+        enabled: bool,
+        constant: [f32; 4],
+    }
+
     if commands.is_empty() || bounds.width <= 0.0 || bounds.height <= 0.0 {
         return Vec::new();
     }
@@ -555,14 +565,42 @@ fn build_webgl_draws(
     let mut draws = Vec::new();
     let mut clear_color = [0.0, 0.0, 0.0, 0.0];
     let mut buffers: HashMap<u32, Vec<f32>> = HashMap::new();
-    let mut bound_buffer: Option<u32> = None;
-    let mut attrib_size = 2usize;
-    let mut attrib_stride = 0usize;
-    let mut attrib_offset = 0usize;
-    let mut attrib_enabled = false;
+    let mut attributes: HashMap<u32, AttribState> = HashMap::new();
+    let mut viewport = [0.0f32, 0.0, bounds.width, bounds.height];
+
+    attributes.insert(
+        0,
+        AttribState {
+            buffer_id: None,
+            size: 2,
+            stride: 0,
+            offset: 0,
+            enabled: false,
+            constant: [0.0, 0.0, 0.0, 1.0],
+        },
+    );
+    attributes.insert(
+        1,
+        AttribState {
+            buffer_id: None,
+            size: 4,
+            stride: 0,
+            offset: 0,
+            enabled: false,
+            constant: [1.0, 1.0, 1.0, 1.0],
+        },
+    );
 
     for command in commands {
         match command {
+            WebGlCommand::Viewport { x, y, width, height } => {
+                viewport = [
+                    *x as f32,
+                    *y as f32,
+                    (*width).max(0) as f32,
+                    (*height).max(0) as f32,
+                ];
+            }
             WebGlCommand::ClearColor(color) => clear_color = *color,
             WebGlCommand::Clear { mask } if mask & 0x4000 != 0 => {
                 let screen = Rect {
@@ -597,50 +635,133 @@ fn build_webgl_draws(
             WebGlCommand::UploadArrayBuffer { id, data } => {
                 buffers.insert(*id, data.clone());
             }
-            WebGlCommand::BindArrayBuffer(id) => bound_buffer = *id,
             WebGlCommand::VertexAttribPointer {
                 index,
                 size,
                 stride_floats,
                 offset_floats,
-            } if *index == 0 => {
-                attrib_size = (*size as usize).clamp(1, 4);
-                attrib_stride = *stride_floats as usize;
-                attrib_offset = *offset_floats as usize;
+                buffer_id,
+            } => {
+                let entry = attributes.entry(*index).or_insert(AttribState {
+                    buffer_id: None,
+                    size: 4,
+                    stride: 0,
+                    offset: 0,
+                    enabled: false,
+                    constant: [0.0, 0.0, 0.0, 1.0],
+                });
+                entry.buffer_id = *buffer_id;
+                entry.size = (*size as usize).clamp(1, 4);
+                entry.stride = *stride_floats as usize;
+                entry.offset = *offset_floats as usize;
             }
-            WebGlCommand::EnableVertexAttribArray(index) if *index == 0 => {
-                attrib_enabled = true;
+            WebGlCommand::EnableVertexAttribArray(index) => {
+                attributes
+                    .entry(*index)
+                    .or_insert(AttribState {
+                        buffer_id: None,
+                        size: 4,
+                        stride: 0,
+                        offset: 0,
+                        enabled: false,
+                        constant: [0.0, 0.0, 0.0, 1.0],
+                    })
+                    .enabled = true;
             }
-            WebGlCommand::DrawArrays { mode, first, count }
-                if *mode == 0x0004 && attrib_enabled =>
-            {
-                let Some(buffer_id) = bound_buffer else {
+            WebGlCommand::VertexAttrib4f { index, value } => {
+                attributes
+                    .entry(*index)
+                    .or_insert(AttribState {
+                        buffer_id: None,
+                        size: 4,
+                        stride: 0,
+                        offset: 0,
+                        enabled: false,
+                        constant: [0.0, 0.0, 0.0, 1.0],
+                    })
+                    .constant = *value;
+            }
+            WebGlCommand::DrawArrays { mode, first, count } if *mode == 0x0004 => {
+                let Some(position_state) = attributes.get(&0).copied() else {
                     continue;
                 };
-                let Some(data) = buffers.get(&buffer_id) else {
+                if !position_state.enabled {
+                    continue;
+                }
+                let Some(position_buffer_id) = position_state.buffer_id else {
                     continue;
                 };
-                let stride = if attrib_stride == 0 {
-                    attrib_size
+                let Some(position_data) = buffers.get(&position_buffer_id) else {
+                    continue;
+                };
+
+                let color_state = attributes.get(&1).copied().unwrap_or(AttribState {
+                    buffer_id: None,
+                    size: 4,
+                    stride: 0,
+                    offset: 0,
+                    enabled: false,
+                    constant: [1.0, 1.0, 1.0, 1.0],
+                });
+
+                let position_stride = if position_state.stride == 0 {
+                    position_state.size
                 } else {
-                    attrib_stride
+                    position_state.stride
                 };
+                let color_stride = if color_state.stride == 0 {
+                    color_state.size
+                } else {
+                    color_state.stride
+                };
+
                 let mut vertices = Vec::new();
                 for vertex_index in *first as usize..(*first + *count) as usize {
-                    let base = attrib_offset + vertex_index.saturating_mul(stride);
-                    if base >= data.len() {
+                    let pos_base =
+                        position_state.offset + vertex_index.saturating_mul(position_stride);
+                    if pos_base >= position_data.len() {
                         break;
                     }
-                    let x = data.get(base).copied().unwrap_or(0.0);
-                    let y = data.get(base + 1).copied().unwrap_or(0.0);
+                    let x = position_data.get(pos_base).copied().unwrap_or(0.0);
+                    let y = position_data.get(pos_base + 1).copied().unwrap_or(0.0);
 
-                    let sx = bounds.x + ((x + 1.0) * 0.5) * bounds.width;
-                    let sy = bounds.y - scroll_y + (1.0 - (y + 1.0) * 0.5) * bounds.height;
+                    let color = if color_state.enabled {
+                        if let Some(color_buffer_id) = color_state.buffer_id {
+                            if let Some(color_data) = buffers.get(&color_buffer_id) {
+                                let base =
+                                    color_state.offset + vertex_index.saturating_mul(color_stride);
+                                [
+                                    color_data.get(base).copied().unwrap_or(0.0),
+                                    color_data.get(base + 1).copied().unwrap_or(0.0),
+                                    color_data.get(base + 2).copied().unwrap_or(0.0),
+                                    color_data.get(base + 3).copied().unwrap_or(1.0)
+                                        * layer_opacity,
+                                ]
+                            } else {
+                                color_state.constant
+                            }
+                        } else {
+                            color_state.constant
+                        }
+                    } else {
+                        [
+                            color_state.constant[0],
+                            color_state.constant[1],
+                            color_state.constant[2],
+                            color_state.constant[3] * layer_opacity,
+                        ]
+                    };
+
+                    let vx = viewport[0] + ((x + 1.0) * 0.5) * viewport[2];
+                    let vy = viewport[1] + (1.0 - (y + 1.0) * 0.5) * viewport[3];
+                    let sx = bounds.x + vx;
+                    let sy = bounds.y - scroll_y + vy;
                     let ndc_x = sx / viewport_width * 2.0 - 1.0;
                     let ndc_y = 1.0 - sy / viewport_height * 2.0;
+
                     vertices.push(WebGlVertex {
                         position: [ndc_x, ndc_y],
-                        color: [1.0, 1.0, 1.0, layer_opacity],
+                        color,
                     });
                 }
 
