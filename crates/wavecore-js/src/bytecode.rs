@@ -34,6 +34,7 @@ pub enum OpCode {
     JumpIfFalse(usize),
     Loop(usize),
     Call(usize),
+    Construct(usize),
     Return,
     GetProp(String),
     SetProp(String),
@@ -45,6 +46,11 @@ pub enum OpCode {
         chunk_index: usize,
         name: String,
         params: Vec<String>,
+    },
+    MakeClass {
+        name: String,
+        constructor: Option<(usize, Vec<String>)>,
+        methods: Vec<(String, usize, Vec<String>)>,
     },
     PushTry {
         catch_ip: usize,
@@ -218,6 +224,41 @@ impl Compiler {
                 });
                 self.chunk_mut().write_op(OpCode::DeclVar(name.clone()));
             }
+            Stmt::ClassDecl { name, methods } => {
+                let old_chunk = self.current_chunk;
+                let mut constructor = None;
+                let mut compiled_methods = Vec::new();
+
+                for method in methods {
+                    let method_chunk_idx = self.chunks.len();
+                    self.chunks.push(Chunk::new());
+                    self.current_chunk = method_chunk_idx;
+                    for statement in &method.body {
+                        self.compile_stmt(statement)?;
+                    }
+                    self.chunk_mut().write_op(OpCode::Undefined);
+                    self.chunk_mut().write_op(OpCode::Return);
+                    self.current_chunk = old_chunk;
+
+                    if method.name == "constructor" {
+                        constructor = Some((method_chunk_idx, method.params.clone()));
+                    } else {
+                        compiled_methods.push((
+                            method.name.clone(),
+                            method_chunk_idx,
+                            method.params.clone(),
+                        ));
+                    }
+                }
+
+                self.current_chunk = old_chunk;
+                self.chunk_mut().write_op(OpCode::MakeClass {
+                    name: name.clone(),
+                    constructor,
+                    methods: compiled_methods,
+                });
+                self.chunk_mut().write_op(OpCode::DeclVar(name.clone()));
+            }
             Stmt::Return(val) => {
                 if let Some(expr) = val {
                     self.compile_expr(expr)?;
@@ -368,7 +409,7 @@ impl Compiler {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk_mut().write_op(OpCode::Call(args.len()));
+                self.chunk_mut().write_op(OpCode::Construct(args.len()));
             }
             Expr::Binary { op, left, right } => {
                 match op {
