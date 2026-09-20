@@ -5,6 +5,9 @@ use wavecore_layout::{Edges, LayoutBox, Rect};
 pub enum Canvas2DCommand {
     FillRect { x: f32, y: f32, width: f32, height: f32, color: String },
     StrokeRect { x: f32, y: f32, width: f32, height: f32, color: String, line_width: f32 },
+    DrawLine { x1: f32, y1: f32, x2: f32, y2: f32, color: String, line_width: f32 },
+    FillCircle { cx: f32, cy: f32, radius: f32, color: String },
+    StrokeCircle { cx: f32, cy: f32, radius: f32, color: String, line_width: f32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -226,6 +229,34 @@ pub fn append_canvas_commands(
                                 radius: 0.0,
                             });
                         }
+                        Canvas2DCommand::DrawLine { x1, y1, x2, y2, color, line_width } => {
+                            out.push(DisplayCommand::DrawLine {
+                                x1: layout.content.x + *x1,
+                                y1: layout.content.y + *y1,
+                                x2: layout.content.x + *x2,
+                                y2: layout.content.y + *y2,
+                                color: color.clone(),
+                                width: line_width.max(1.0),
+                            });
+                        }
+                        Canvas2DCommand::FillCircle { cx, cy, radius, color } => {
+                            out.push(DisplayCommand::DrawCircle {
+                                cx: layout.content.x + *cx,
+                                cy: layout.content.y + *cy,
+                                radius: radius.max(0.0),
+                                fill: Some(color.clone()),
+                                stroke: None,
+                            });
+                        }
+                        Canvas2DCommand::StrokeCircle { cx, cy, radius, color, line_width } => {
+                            out.push(DisplayCommand::DrawCircle {
+                                cx: layout.content.x + *cx,
+                                cy: layout.content.y + *cy,
+                                radius: radius.max(0.0),
+                                fill: None,
+                                stroke: Some((color.clone(), line_width.max(1.0))),
+                            });
+                        }
                     }
                 }
                 out.push(DisplayCommand::PopClip);
@@ -285,6 +316,34 @@ pub fn append_canvas_to_compositor_frame(
                                     },
                                     color: color.clone(),
                                     radius: 0.0,
+                                });
+                            }
+                            Canvas2DCommand::DrawLine { x1, y1, x2, y2, color, line_width } => {
+                                layer.commands.push(DisplayCommand::DrawLine {
+                                    x1: layout.content.x + *x1,
+                                    y1: layout.content.y + *y1,
+                                    x2: layout.content.x + *x2,
+                                    y2: layout.content.y + *y2,
+                                    color: color.clone(),
+                                    width: line_width.max(1.0),
+                                });
+                            }
+                            Canvas2DCommand::FillCircle { cx, cy, radius, color } => {
+                                layer.commands.push(DisplayCommand::DrawCircle {
+                                    cx: layout.content.x + *cx,
+                                    cy: layout.content.y + *cy,
+                                    radius: radius.max(0.0),
+                                    fill: Some(color.clone()),
+                                    stroke: None,
+                                });
+                            }
+                            Canvas2DCommand::StrokeCircle { cx, cy, radius, color, line_width } => {
+                                layer.commands.push(DisplayCommand::DrawCircle {
+                                    cx: layout.content.x + *cx,
+                                    cy: layout.content.y + *cy,
+                                    radius: radius.max(0.0),
+                                    fill: None,
+                                    stroke: Some((color.clone(), line_width.max(1.0))),
                                 });
                             }
                         }
