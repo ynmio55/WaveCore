@@ -2,6 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use wavecore_layout::Rect;
 use wavecore_pixels::{Rgba, Surface};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use wavecore_render::{CompositorFrame, WebGlCommand};
 
 #[repr(C)]
@@ -25,11 +26,33 @@ struct GpuWebGlDraw {
     scissor: (u32, u32, u32, u32),
 }
 
-struct GpuLayer {
+const COMPOSITOR_TILE_SIZE: f32 = 512.0;
+const TILE_CACHE_TTL_FRAMES: u64 = 180;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TileKey {
+    layer_id: u64,
+    x: i32,
+    y: i32,
+}
+
+struct CachedTile {
     _texture: wgpu::Texture,
     _view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
+    fingerprint: u64,
+    width: u32,
+    height: u32,
+    last_used_frame: u64,
+}
+
+struct GpuTileDraw {
+    key: TileKey,
     vertex_buffer: wgpu::Buffer,
+}
+
+struct GpuLayer {
+    tiles: Vec<GpuTileDraw>,
     webgl_draws: Vec<GpuWebGlDraw>,
 }
 
@@ -46,6 +69,8 @@ pub struct GpuCompositor {
     sampler: wgpu::Sampler,
     raster_template: Surface,
     adapter_name: String,
+    tile_cache: HashMap<TileKey, CachedTile>,
+    frame_counter: u64,
 }
 
 impl GpuCompositor {
@@ -323,6 +348,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             sampler,
             raster_template: Surface::new(1, 1),
             adapter_name,
+            tile_cache: HashMap::new(),
+            frame_counter: 0,
         })
     }
 
@@ -374,8 +401,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             height: self.config.height as f32,
         };
 
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+        let current_frame = self.frame_counter;
+
         let mut gpu_layers = Vec::new();
-        for layer in &sorted_layers {
+        for (layer_index, layer) in sorted_layers.iter().enumerate() {
             let screen_bounds = Rect {
                 x: layer.bounds.x,
                 y: layer.bounds.y - scroll_y,
@@ -395,76 +425,155 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 width: visible_screen.width,
                 height: visible_screen.height,
             };
+            let layer_id = layer
+                .node_id
+                .unwrap_or(0x8000_0000_0000_0000u64 | layer_index as u64);
+            let fingerprint = layer_fingerprint(layer);
 
-            let tex_w = visible_screen.width.ceil().max(1.0) as u32;
-            let tex_h = visible_screen.height.ceil().max(1.0) as u32;
-            let mut raster = self
-                .raster_template
-                .blank_like(tex_w, tex_h, Rgba(0, 0, 0, 0));
-            raster.paint_offset(
-                &layer.commands,
-                -visible_doc.x,
-                -visible_doc.y,
-            );
+            let min_tile_x =
+                ((visible_doc.x - layer.bounds.x) / COMPOSITOR_TILE_SIZE).floor() as i32;
+            let max_tile_x = ((visible_doc.x + visible_doc.width - layer.bounds.x)
+                / COMPOSITOR_TILE_SIZE)
+                .floor() as i32;
+            let min_tile_y =
+                ((visible_doc.y - layer.bounds.y) / COMPOSITOR_TILE_SIZE).floor() as i32;
+            let max_tile_y = ((visible_doc.y + visible_doc.height - layer.bounds.y)
+                / COMPOSITOR_TILE_SIZE)
+                .floor() as i32;
 
-            let rgba = surface_rgba_bytes(&raster);
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("WaveCore Compositor Layer"),
-                size: wgpu::Extent3d {
-                    width: tex_w,
-                    height: tex_h,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
+            let mut tile_draws = Vec::new();
+            for tile_y in min_tile_y..=max_tile_y {
+                for tile_x in min_tile_x..=max_tile_x {
+                    let tile_doc = compositor_tile_rect(layer.bounds, tile_x, tile_y);
+                    if tile_doc.width <= 0.0 || tile_doc.height <= 0.0 {
+                        continue;
+                    }
 
-            write_texture_rgba(
-                &self.queue,
-                &texture,
-                tex_w,
-                tex_h,
-                &rgba,
-            );
+                    let key = TileKey {
+                        layer_id,
+                        x: tile_x,
+                        y: tile_y,
+                    };
+                    let tex_w = tile_doc.width.ceil().max(1.0) as u32;
+                    let tex_h = tile_doc.height.ceil().max(1.0) as u32;
+                    let reusable = self
+                        .tile_cache
+                        .get(&key)
+                        .map(|tile| {
+                            tile.fingerprint == fingerprint
+                                && tile.width == tex_w
+                                && tile.height == tex_h
+                        })
+                        .unwrap_or(false);
 
-            let texture_view =
-                texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let bind_group =
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("WaveCore Layer Bind Group"),
-                    layout: &self.bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&texture_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                    ],
-                });
+                    if !reusable {
+                        let mut raster = self
+                            .raster_template
+                            .blank_like(tex_w, tex_h, Rgba(0, 0, 0, 0));
+                        raster.paint_offset(
+                            &layer.commands,
+                            -tile_doc.x,
+                            -tile_doc.y,
+                        );
+                        let rgba = surface_rgba_bytes(&raster);
+                        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("WaveCore Cached Compositor Tile"),
+                            size: wgpu::Extent3d {
+                                width: tex_w,
+                                height: tex_h,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        write_texture_rgba(
+                            &self.queue,
+                            &texture,
+                            tex_w,
+                            tex_h,
+                            &rgba,
+                        );
+                        let texture_view =
+                            texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let bind_group =
+                            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("WaveCore Cached Tile Bind Group"),
+                                layout: &self.bind_group_layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(&texture_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                    },
+                                ],
+                            });
+                        self.tile_cache.insert(
+                            key,
+                            CachedTile {
+                                _texture: texture,
+                                _view: texture_view,
+                                bind_group,
+                                fingerprint,
+                                width: tex_w,
+                                height: tex_h,
+                                last_used_frame: current_frame,
+                            },
+                        );
+                    } else if let Some(tile) = self.tile_cache.get_mut(&key) {
+                        tile.last_used_frame = current_frame;
+                    }
 
-            let vertices = quad_vertices(
-                visible_screen,
-                self.config.width as f32,
-                self.config.height as f32,
-                layer.opacity,
-            );
-            let vertex_buffer = {
-                use wgpu::util::DeviceExt;
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("WaveCore Layer Vertices"),
-                        contents: bytemuck::cast_slice(&vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-            };
+                    let tile_screen = Rect {
+                        x: tile_doc.x,
+                        y: tile_doc.y - scroll_y,
+                        width: tile_doc.width,
+                        height: tile_doc.height,
+                    };
+                    let Some(draw_rect) = tile_screen.intersection(&viewport) else {
+                        continue;
+                    };
+
+                    let u0 = ((draw_rect.x - tile_screen.x) / tile_screen.width)
+                        .clamp(0.0, 1.0);
+                    let v0 = ((draw_rect.y - tile_screen.y) / tile_screen.height)
+                        .clamp(0.0, 1.0);
+                    let u1 = ((draw_rect.x + draw_rect.width - tile_screen.x)
+                        / tile_screen.width)
+                        .clamp(0.0, 1.0);
+                    let v1 = ((draw_rect.y + draw_rect.height - tile_screen.y)
+                        / tile_screen.height)
+                        .clamp(0.0, 1.0);
+
+                    let vertices = quad_vertices_uv(
+                        draw_rect,
+                        self.config.width as f32,
+                        self.config.height as f32,
+                        [u0, v0, u1, v1],
+                        layer.opacity,
+                    );
+                    let vertex_buffer = {
+                        use wgpu::util::DeviceExt;
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("WaveCore Cached Tile Vertices"),
+                                contents: bytemuck::cast_slice(&vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            })
+                    };
+                    tile_draws.push(GpuTileDraw {
+                        key,
+                        vertex_buffer,
+                    });
+                }
+            }
 
             let webgl_draws = build_webgl_draws(
                 &self.device,
@@ -477,13 +586,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             );
 
             gpu_layers.push(GpuLayer {
-                _texture: texture,
-                _view: texture_view,
-                bind_group,
-                vertex_buffer,
+                tiles: tile_draws,
                 webgl_draws,
             });
         }
+
+        self.tile_cache.retain(|_, tile| {
+            current_frame.saturating_sub(tile.last_used_frame) <= TILE_CACHE_TTL_FRAMES
+        });
 
         let mut encoder =
             self.device
@@ -515,9 +625,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
             for layer in &gpu_layers {
                 pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &layer.bind_group, &[]);
-                pass.set_vertex_buffer(0, layer.vertex_buffer.slice(..));
-                pass.draw(0..6, 0..1);
+                for tile_draw in &layer.tiles {
+                    let Some(tile) = self.tile_cache.get(&tile_draw.key) else {
+                        continue;
+                    };
+                    pass.set_bind_group(0, &tile.bind_group, &[]);
+                    pass.set_vertex_buffer(0, tile_draw.vertex_buffer.slice(..));
+                    pass.draw(0..6, 0..1);
+                }
 
                 if !layer.webgl_draws.is_empty() {
                     pass.set_pipeline(&self.webgl_pipeline);
@@ -541,6 +656,30 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
 }
 
+
+
+fn layer_fingerprint(layer: &wavecore_render::CompositorLayer) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}", layer.commands).hash(&mut hasher);
+    layer.bounds.x.to_bits().hash(&mut hasher);
+    layer.bounds.y.to_bits().hash(&mut hasher);
+    layer.bounds.width.to_bits().hash(&mut hasher);
+    layer.bounds.height.to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn compositor_tile_rect(bounds: Rect, tile_x: i32, tile_y: i32) -> Rect {
+    let x = bounds.x + tile_x as f32 * COMPOSITOR_TILE_SIZE;
+    let y = bounds.y + tile_y as f32 * COMPOSITOR_TILE_SIZE;
+    let right = (x + COMPOSITOR_TILE_SIZE).min(bounds.x + bounds.width);
+    let bottom = (y + COMPOSITOR_TILE_SIZE).min(bounds.y + bounds.height);
+    Rect {
+        x,
+        y,
+        width: (right - x).max(0.0),
+        height: (bottom - y).max(0.0),
+    }
+}
 
 fn build_webgl_draws(
     device: &wgpu::Device,
@@ -1037,19 +1176,36 @@ fn quad_vertices(
     viewport_height: f32,
     alpha: f32,
 ) -> [Vertex; 6] {
+    quad_vertices_uv(
+        rect,
+        viewport_width,
+        viewport_height,
+        [0.0, 0.0, 1.0, 1.0],
+        alpha,
+    )
+}
+
+fn quad_vertices_uv(
+    rect: Rect,
+    viewport_width: f32,
+    viewport_height: f32,
+    uv: [f32; 4],
+    alpha: f32,
+) -> [Vertex; 6] {
     let left = rect.x / viewport_width * 2.0 - 1.0;
     let right = (rect.x + rect.width) / viewport_width * 2.0 - 1.0;
     let top = 1.0 - rect.y / viewport_height * 2.0;
     let bottom = 1.0 - (rect.y + rect.height) / viewport_height * 2.0;
+    let [u0, v0, u1, v1] = uv;
     let a = alpha.clamp(0.0, 1.0);
 
     [
-        Vertex { position: [left, top], uv: [0.0, 0.0], alpha: a },
-        Vertex { position: [right, top], uv: [1.0, 0.0], alpha: a },
-        Vertex { position: [right, bottom], uv: [1.0, 1.0], alpha: a },
-        Vertex { position: [left, top], uv: [0.0, 0.0], alpha: a },
-        Vertex { position: [right, bottom], uv: [1.0, 1.0], alpha: a },
-        Vertex { position: [left, bottom], uv: [0.0, 1.0], alpha: a },
+        Vertex { position: [left, top], uv: [u0, v0], alpha: a },
+        Vertex { position: [right, top], uv: [u1, v0], alpha: a },
+        Vertex { position: [right, bottom], uv: [u1, v1], alpha: a },
+        Vertex { position: [left, top], uv: [u0, v0], alpha: a },
+        Vertex { position: [right, bottom], uv: [u1, v1], alpha: a },
+        Vertex { position: [left, bottom], uv: [u0, v1], alpha: a },
     ]
 }
 
@@ -1058,6 +1214,35 @@ mod tests {
     use super::*;
 
     #[test]
+    #[test]
+    fn compositor_tiles_clip_to_layer_bounds() {
+        let bounds = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 700.0,
+            height: 600.0,
+        };
+        let first = compositor_tile_rect(bounds, 0, 0);
+        let edge = compositor_tile_rect(bounds, 1, 1);
+        assert_eq!(first.width, 512.0);
+        assert_eq!(first.height, 512.0);
+        assert_eq!(edge.width, 188.0);
+        assert_eq!(edge.height, 88.0);
+    }
+
+    #[test]
+    fn quad_vertices_support_cropped_uvs() {
+        let v = quad_vertices_uv(
+            Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 },
+            100.0,
+            100.0,
+            [0.25, 0.0, 0.75, 1.0],
+            1.0,
+        );
+        assert_eq!(v[0].uv, [0.25, 0.0]);
+        assert_eq!(v[2].uv, [0.75, 1.0]);
+    }
+
     fn quad_vertices_map_pixels_to_ndc() {
         let v = quad_vertices(
             Rect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 },
