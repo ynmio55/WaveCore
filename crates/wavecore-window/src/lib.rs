@@ -1,7 +1,11 @@
+mod gpu;
+
+use gpu::GpuCompositor;
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use std::collections::VecDeque;
 use wavecore_layout::Rect;
 use wavecore_pixels::Surface;
+use wavecore_render::CompositorFrame;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowEvent {
@@ -21,6 +25,7 @@ pub enum WindowEvent {
 }
 
 pub struct BrowserWindow {
+    gpu: Option<GpuCompositor>,
     window: Window,
     pub width: usize,
     pub height: usize,
@@ -42,7 +47,9 @@ impl BrowserWindow {
             },
         )?;
         window.set_target_fps(60);
+        let gpu = GpuCompositor::new(&window, width, height).ok();
         Ok(Self {
+            gpu,
             window,
             width,
             height,
@@ -55,6 +62,31 @@ impl BrowserWindow {
 
     pub fn set_title(&mut self, title: &str) {
         self.window.set_title(title);
+    }
+
+    pub fn gpu_enabled(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    pub fn gpu_adapter_name(&self) -> Option<&str> {
+        self.gpu.as_ref().map(GpuCompositor::adapter_name)
+    }
+
+    pub fn present_compositor(
+        &mut self,
+        frame: &CompositorFrame,
+        scroll_y: f32,
+    ) -> Result<bool, String> {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Ok(false);
+        };
+        match gpu.present(frame, scroll_y) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                self.gpu = None;
+                Err(error)
+            }
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -186,6 +218,9 @@ impl BrowserWindow {
             self.width = w;
             self.height = h;
             self.back_buffer = vec![0; w * h];
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.resize(w, h);
+            }
             Some((w, h))
         } else {
             None
