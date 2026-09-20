@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use crate::bytecode::{Chunk, OpCode};
 use crate::value::{
-    Environment, JsFunction, JsObject, JsPromise, JsValue, PromiseState,
+    Environment, JsFunction, JsObject, JsPromise, JsValue, PromiseState, TypedArrayKind,
+    TypedArrayValue,
 };
 
 pub struct CallFrame {
@@ -37,37 +38,48 @@ pub struct VM {
     pub console_output: Vec<String>,
 }
 
-#[derive(Clone, Copy)]
-enum TypedArrayKind {
-    Float32,
-    Uint8,
-    Uint16,
-    Uint32,
-}
-
-fn typed_array_number(value: f64, kind: TypedArrayKind) -> f64 {
-    match kind {
-        TypedArrayKind::Float32 => (value as f32) as f64,
-        TypedArrayKind::Uint8 => (value as i128).rem_euclid(1i128 << 8) as f64,
-        TypedArrayKind::Uint16 => (value as i128).rem_euclid(1i128 << 16) as f64,
-        TypedArrayKind::Uint32 => (value as i128).rem_euclid(1i128 << 32) as f64,
-    }
-}
-
-fn make_typed_array(source: Option<&JsValue>, kind: TypedArrayKind) -> JsValue {
-    let values = match source {
-        Some(JsValue::Array(items)) => items
-            .borrow()
-            .iter()
-            .map(|value| JsValue::Number(typed_array_number(value.to_number(), kind)))
-            .collect(),
-        Some(JsValue::Number(length)) if length.is_finite() && *length >= 0.0 => {
-            vec![JsValue::Number(0.0); (*length as usize).min(16_777_216)]
+fn make_typed_array(args: &[JsValue], kind: TypedArrayKind) -> Result<JsValue, String> {
+    let source = args.first();
+    let array = match source {
+        Some(JsValue::ArrayBuffer(buffer)) => {
+            let byte_offset = args
+                .get(1)
+                .map(|v| v.to_number().max(0.0) as usize)
+                .unwrap_or(0);
+            let length = args.get(2).and_then(|v| {
+                let n = v.to_number();
+                (n.is_finite() && n >= 0.0).then_some(n as usize)
+            });
+            TypedArrayValue::from_buffer(buffer.clone(), kind, byte_offset, length)?
         }
-        Some(other) => vec![JsValue::Number(typed_array_number(other.to_number(), kind))],
-        None => Vec::new(),
+        Some(JsValue::TypedArray(other)) => {
+            let values = other.borrow().values();
+            let mut out = TypedArrayValue::new(kind, values.len());
+            for (index, value) in values.iter().enumerate() {
+                out.set(index, value.to_number());
+            }
+            out
+        }
+        Some(JsValue::Array(items)) => {
+            let values = items.borrow();
+            let mut out = TypedArrayValue::new(kind, values.len());
+            for (index, value) in values.iter().enumerate() {
+                out.set(index, value.to_number());
+            }
+            out
+        }
+        Some(JsValue::Number(length)) if length.is_finite() && *length >= 0.0 => {
+            let length = (*length as usize).min(16_777_216);
+            TypedArrayValue::new(kind, length)
+        }
+        Some(other) => {
+            let mut out = TypedArrayValue::new(kind, 1);
+            out.set(0, other.to_number());
+            out
+        }
+        None => TypedArrayValue::new(kind, 0),
     };
-    JsValue::new_array(values)
+    Ok(JsValue::TypedArray(Rc::new(RefCell::new(array))))
 }
 
 fn json_to_js(value: &serde_json::Value) -> JsValue {
@@ -117,6 +129,15 @@ fn js_to_json(value: &JsValue, depth: usize) -> Result<serde_json::Value, String
                 .map(|item| js_to_json(item, depth + 1))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        JsValue::TypedArray(items) => serde_json::Value::Array(
+            items
+                .borrow()
+                .values()
+                .iter()
+                .map(|item| js_to_json(item, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        JsValue::ArrayBuffer(_) => serde_json::Value::Object(serde_json::Map::new()),
         JsValue::Object(obj) => {
             let borrowed = obj.borrow();
             let mut map = serde_json::Map::new();
@@ -317,6 +338,7 @@ impl VM {
                 };
                 match source {
                     JsValue::Array(items) => Ok(JsValue::new_array(items.borrow().clone())),
+                    JsValue::TypedArray(items) => Ok(JsValue::new_array(items.borrow().values())),
                     JsValue::String(text) => Ok(JsValue::new_array(
                         text.chars()
                             .map(|ch| JsValue::String(ch.to_string()))
@@ -344,6 +366,9 @@ impl VM {
                         .cloned()
                         .collect::<Vec<_>>(),
                     Some(JsValue::Array(items)) => (0..items.borrow().len())
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>(),
+                    Some(JsValue::TypedArray(items)) => (0..items.borrow().length)
                         .map(|i| i.to_string())
                         .collect::<Vec<_>>(),
                     _ => Vec::new(),
@@ -377,32 +402,35 @@ impl VM {
             JsValue::Object(Rc::new(RefCell::new(object_obj))),
         );
 
-        // Typed arrays used heavily by graphics/media workloads. Pulse currently
-        // stores them in the compact numeric array representation while preserving
-        // constructor coercion semantics needed by WebGL buffer uploads.
+        // ArrayBuffer and typed arrays share a real byte backing store.
+        self.globals.insert(
+            "ArrayBuffer".to_string(),
+            JsValue::native("ArrayBuffer", |_vm, args| {
+                let length = args
+                    .first()
+                    .map(|v| v.to_number())
+                    .unwrap_or(0.0);
+                if !length.is_finite() || length < 0.0 || length > 268_435_456.0 {
+                    return Err("RangeError: invalid ArrayBuffer length".to_string());
+                }
+                Ok(JsValue::ArrayBuffer(Rc::new(RefCell::new(vec![0; length as usize]))))
+            }),
+        );
         self.globals.insert(
             "Float32Array".to_string(),
-            JsValue::native("Float32Array", |_vm, args| {
-                Ok(make_typed_array(args.first(), TypedArrayKind::Float32))
-            }),
+            JsValue::native("Float32Array", |_vm, args| make_typed_array(args, TypedArrayKind::Float32)),
         );
         self.globals.insert(
             "Uint8Array".to_string(),
-            JsValue::native("Uint8Array", |_vm, args| {
-                Ok(make_typed_array(args.first(), TypedArrayKind::Uint8))
-            }),
+            JsValue::native("Uint8Array", |_vm, args| make_typed_array(args, TypedArrayKind::Uint8)),
         );
         self.globals.insert(
             "Uint16Array".to_string(),
-            JsValue::native("Uint16Array", |_vm, args| {
-                Ok(make_typed_array(args.first(), TypedArrayKind::Uint16))
-            }),
+            JsValue::native("Uint16Array", |_vm, args| make_typed_array(args, TypedArrayKind::Uint16)),
         );
         self.globals.insert(
             "Uint32Array".to_string(),
-            JsValue::native("Uint32Array", |_vm, args| {
-                Ok(make_typed_array(args.first(), TypedArrayKind::Uint32))
-            }),
+            JsValue::native("Uint32Array", |_vm, args| make_typed_array(args, TypedArrayKind::Uint32)),
         );
 
         // Promise built-in
