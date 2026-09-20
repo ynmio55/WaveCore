@@ -527,4 +527,101 @@ mod tests {
         assert_eq!(result, JsValue::Number(64.0));
     }
 
+    #[test]
+    fn eventtarget_custom_event_dispatch_and_remove_listener_work() {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("id".to_string(), "button".to_string());
+        let button = Node::element_with_attributes("button", attrs, vec![]);
+        let root = Rc::new(RefCell::new(Node::document(vec![button])));
+        let bridge = DomBridge::new(root);
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        let result = eval_script(
+            r#"
+                let button = document.getElementById("button");
+                let observed = 0;
+                let handler = function(event) {
+                    observed = event.detail;
+                    event.preventDefault();
+                };
+                button.addEventListener("wave", handler);
+                let first = button.dispatchEvent(
+                    new CustomEvent("wave", { detail: 7, cancelable: true })
+                );
+                button.removeEventListener("wave", handler);
+                button.dispatchEvent(new CustomEvent("wave", { detail: 9 }));
+                observed + (first ? 100 : 0);
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(result, JsValue::Number(7.0));
+    }
+
+    #[test]
+    fn fetch_data_model_headers_request_response_and_arraybuffer_work() {
+        let root = Rc::new(RefCell::new(Node::document(vec![])));
+        let bridge = DomBridge::with_url(root, "https://wavecore.local/");
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        eval_script(
+            r#"
+                let headers = new Headers({ "x-wave": "core" });
+                headers.append("x-wave", "engine");
+                let request = new Request("data:application/json,{"ok":true}", {
+                    method: "GET",
+                    headers: headers
+                });
+                let fetchedStatus = 0;
+                let parsedOk = false;
+                fetch(request)
+                    .then(function(response) {
+                        fetchedStatus = response.status;
+                        return response.json();
+                    })
+                    .then(function(body) {
+                        parsedOk = body.ok;
+                    });
+
+                let response = new Response("abc", {
+                    status: 201,
+                    headers: { "content-type": "text/plain" }
+                });
+                let responseStatus = response.status;
+                let byteLength = 0;
+                response.arrayBuffer().then(function(buffer) {
+                    byteLength = buffer.byteLength;
+                });
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        let result = eval_script(
+            "fetchedStatus + (parsedOk ? 10 : 0) + responseStatus + byteLength + (headers.get("x-wave") == "core, engine" ? 1 : 0);",
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::Number(415.0));
+    }
+
+    #[test]
+    fn date_and_regexp_runtime_primitives_work() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let date = new Date(1234);
+                let re = new RegExp("^wave(core)?$", "i");
+                let match = re.exec("WaveCore");
+                date.getTime() + (re.test("wave") ? 1 : 0) + match.length;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::Number(1237.0));
+    }
+
 }
