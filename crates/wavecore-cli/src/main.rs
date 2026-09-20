@@ -116,6 +116,7 @@ fn layout_and_render(
     css: &str,
     width: f32,
     canvas_commands: &std::collections::HashMap<u64, Vec<wavecore_render::Canvas2DCommand>>,
+    webgl_commands: &std::collections::HashMap<u64, Vec<wavecore_render::WebGlCommand>>,
 ) -> (LayoutBox, CompositorFrame, Vec<DisplayCommand>) {
     let sheet = wavecore_css::parse(css);
     let styled = wavecore_style::style_tree(dom, &sheet);
@@ -124,6 +125,11 @@ fn layout_and_render(
     wavecore_render::append_canvas_to_compositor_frame(
         &layout,
         canvas_commands,
+        &mut compositor_frame,
+    );
+    wavecore_render::append_webgl_to_compositor_frame(
+        &layout,
+        webgl_commands,
         &mut compositor_frame,
     );
     let display_list = compositor_frame.flatten();
@@ -223,8 +229,15 @@ fn main() {
         };
 
         let initial_canvas = state.bridge.canvas_commands_snapshot();
+        let initial_webgl = state.bridge.webgl_commands_snapshot();
         let (mut layout, mut compositor_frame, mut display_list) =
-            layout_and_render(&state.dom.borrow(), &full_css, width as f32, &initial_canvas);
+            layout_and_render(
+                &state.dom.borrow(),
+                &full_css,
+                width as f32,
+                &initial_canvas,
+                &initial_webgl,
+            );
         let mut surface = Surface::new(width as u32, height as u32);
         let gpu_presented = win.present_compositor(&compositor_frame, 0.0).unwrap_or(false);
         if !gpu_presented {
@@ -508,8 +521,15 @@ fn main() {
 
             if needs_re_render {
                 let canvas_commands = state.bridge.canvas_commands_snapshot();
+                let webgl_commands = state.bridge.webgl_commands_snapshot();
                 let (nl, nf, nd) =
-                    layout_and_render(&state.dom.borrow(), &full_css, width as f32, &canvas_commands);
+                    layout_and_render(
+                        &state.dom.borrow(),
+                        &full_css,
+                        width as f32,
+                        &canvas_commands,
+                        &webgl_commands,
+                    );
                 layout = nl;
                 compositor_frame = nf;
                 display_list = nd;
@@ -580,8 +600,15 @@ fn main() {
         };
 
         let canvas_commands = state.bridge.canvas_commands_snapshot();
+        let webgl_commands = state.bridge.webgl_commands_snapshot();
         let (layout, _compositor_frame, display_list) =
-            layout_and_render(&state.dom.borrow(), &full_css, 800.0, &canvas_commands);
+            layout_and_render(
+                &state.dom.borrow(),
+                &full_css,
+                800.0,
+                &canvas_commands,
+                &webgl_commands,
+            );
 
         let render_height = (layout.rect.height as u32 + 100).max(600).min(4000);
         let mut surface = Surface::new(800, render_height);
