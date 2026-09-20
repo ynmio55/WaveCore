@@ -430,11 +430,21 @@ impl DomBridge {
                         let body_json = res.content;
                         resp_obj.set(
                             "json",
-                            JsValue::native("json", move |_vm, _args| {
-                                // Pulse does not yet expose a full JSON parser object model;
-                                // keep the response asynchronous and return the raw JSON text.
+                            JsValue::native("json", move |vm, _args| {
+                                let json_global = vm
+                                    .get_global("JSON")
+                                    .cloned()
+                                    .ok_or_else(|| "JSON global is unavailable".to_string())?;
+                                let JsValue::Object(json_obj) = json_global else {
+                                    return Err("JSON global is invalid".to_string());
+                                };
+                                let parse = json_obj.borrow().get("parse");
+                                let parsed = vm.call_function(
+                                    &parse,
+                                    &[JsValue::String(body_json.clone())],
+                                )?;
                                 Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::resolved(JsValue::String(body_json.clone())),
+                                    JsPromise::resolved(parsed),
                                 ))))
                             }),
                         );
