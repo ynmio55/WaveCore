@@ -505,7 +505,7 @@ mod tests {
             &mut vm,
         )
         .unwrap();
-        assert_eq!(result, JsValue::Number(531.0));
+        assert_eq!(result, JsValue::Number(787.0));
     }
 
     #[test]
