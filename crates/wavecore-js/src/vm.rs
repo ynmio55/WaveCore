@@ -521,6 +521,106 @@ impl VM {
             JsValue::Object(Rc::new(RefCell::new(promise_obj))),
         );
 
+        // Date constructor with millisecond time values and core instance methods.
+        self.globals.insert(
+            "Date".to_string(),
+            JsValue::native("Date", |_vm, args| {
+                let millis = match args.first() {
+                    Some(value) => value.to_number(),
+                    None => std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0),
+                };
+                let millis = if millis.is_finite() { millis } else { f64::NAN };
+                let mut date = JsObject::new();
+                date.set("_timeValue", JsValue::Number(millis));
+
+                date.set(
+                    "getTime",
+                    JsValue::native("getTime", move |_vm, _args| {
+                        Ok(JsValue::Number(millis))
+                    }),
+                );
+                date.set(
+                    "valueOf",
+                    JsValue::native("valueOf", move |_vm, _args| {
+                        Ok(JsValue::Number(millis))
+                    }),
+                );
+                date.set(
+                    "toString",
+                    JsValue::native("toString", move |_vm, _args| {
+                        if millis.is_finite() {
+                            Ok(JsValue::String(format!("Date({millis:.0})")))
+                        } else {
+                            Ok(JsValue::String("Invalid Date".to_string()))
+                        }
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(date))))
+            }),
+        );
+
+        // RegExp constructor. Rust's regex engine supplies Unicode-aware matching,
+        // case-insensitive, multiline, and dotAll modes. Lookbehind is not yet
+        // supported and is intentionally rejected by the underlying compiler.
+        self.globals.insert(
+            "RegExp".to_string(),
+            JsValue::native("RegExp", |_vm, args| {
+                let pattern = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                let flags = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+                let mut builder = regex::RegexBuilder::new(&pattern);
+                builder
+                    .case_insensitive(flags.contains('i'))
+                    .multi_line(flags.contains('m'))
+                    .dot_matches_new_line(flags.contains('s'));
+                let compiled = builder
+                    .build()
+                    .map_err(|error| format!("SyntaxError: invalid regular expression: {error}"))?;
+                let compiled = Rc::new(compiled);
+
+                let mut regexp = JsObject::new();
+                regexp.set("source", JsValue::String(pattern));
+                regexp.set("flags", JsValue::String(flags.clone()));
+                regexp.set("global", JsValue::Boolean(flags.contains('g')));
+                regexp.set("ignoreCase", JsValue::Boolean(flags.contains('i')));
+                regexp.set("multiline", JsValue::Boolean(flags.contains('m')));
+
+                let test_regex = compiled.clone();
+                regexp.set(
+                    "test",
+                    JsValue::native("test", move |_vm, args| {
+                        let input = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                        Ok(JsValue::Boolean(test_regex.is_match(&input)))
+                    }),
+                );
+
+                let exec_regex = compiled.clone();
+                regexp.set(
+                    "exec",
+                    JsValue::native("exec", move |_vm, args| {
+                        let input = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                        let Some(captures) = exec_regex.captures(&input) else {
+                            return Ok(JsValue::Null);
+                        };
+                        let mut values = Vec::new();
+                        for index in 0..captures.len() {
+                            values.push(
+                                captures
+                                    .get(index)
+                                    .map(|m| JsValue::String(m.as_str().to_string()))
+                                    .unwrap_or(JsValue::Undefined),
+                            );
+                        }
+                        Ok(JsValue::new_array(values))
+                    }),
+                );
+
+                Ok(JsValue::Object(Rc::new(RefCell::new(regexp))))
+            }),
+        );
+
         // parseInt & parseFloat
         self.globals.insert(
             "parseInt".to_string(),
