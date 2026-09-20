@@ -329,6 +329,38 @@ impl MediaElement {
         self.paused = true;
     }
 
+    pub fn load_wav_bytes(&mut self, bytes: &[u8]) -> Result<(), MediaError> {
+        if self.media_type != MediaType::Audio {
+            return Err(MediaError::UnsupportedFormat(
+                "WAV audio cannot be loaded into a video element".to_string(),
+            ));
+        }
+        self.network_state = NetworkState::Loading;
+        match AudioBuffer::decode_wav(bytes) {
+            Ok(buffer) => {
+                self.duration = buffer.duration();
+                self.current_time = 0.0;
+                self.ended = false;
+                self.audio_buffer = Some(buffer);
+                self.ready_state = ReadyState::HaveEnoughData;
+                self.network_state = NetworkState::Idle;
+                Ok(())
+            }
+            Err(error) => {
+                self.ready_state = ReadyState::HaveNothing;
+                self.network_state = NetworkState::NoSource;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn buffered_audio_frames(&self) -> usize {
+        self.audio_buffer
+            .as_ref()
+            .map(|buffer| buffer.samples.len() / buffer.channels.max(1))
+            .unwrap_or(0)
+    }
+
     pub fn seek(&mut self, time_secs: f64) {
         let max_time = if self.duration > 0.0 { self.duration } else { 0.0 };
         self.current_time = time_secs.clamp(0.0, max_time);
@@ -463,4 +495,26 @@ mod tests {
         assert_eq!(controls.width, 320);
         assert_eq!(controls.height, 40);
     }
+    #[test]
+    fn audio_element_loads_real_wav_buffer_and_metadata() {
+        let source = AudioBuffer::generate_sine_wave(220.0, 0.1, 48_000, 0.5);
+        let wav = source.encode_wav();
+        let mut audio = MediaElement::new_audio("tone.wav");
+
+        audio.load_wav_bytes(&wav).unwrap();
+
+        assert_eq!(audio.ready_state, ReadyState::HaveEnoughData);
+        assert_eq!(audio.network_state, NetworkState::Idle);
+        assert_eq!(audio.buffered_audio_frames(), 4_800);
+        assert!((audio.duration - 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn invalid_audio_load_moves_element_to_no_source_state() {
+        let mut audio = MediaElement::new_audio("broken.wav");
+        assert!(audio.load_wav_bytes(b"not-a-wave").is_err());
+        assert_eq!(audio.ready_state, ReadyState::HaveNothing);
+        assert_eq!(audio.network_state, NetworkState::NoSource);
+    }
+
 }
