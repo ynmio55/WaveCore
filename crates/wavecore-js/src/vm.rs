@@ -35,6 +35,39 @@ pub struct VM {
     pub console_output: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum TypedArrayKind {
+    Float32,
+    Uint8,
+    Uint16,
+    Uint32,
+}
+
+fn typed_array_number(value: f64, kind: TypedArrayKind) -> f64 {
+    match kind {
+        TypedArrayKind::Float32 => (value as f32) as f64,
+        TypedArrayKind::Uint8 => (value as i128).rem_euclid(1i128 << 8) as f64,
+        TypedArrayKind::Uint16 => (value as i128).rem_euclid(1i128 << 16) as f64,
+        TypedArrayKind::Uint32 => (value as i128).rem_euclid(1i128 << 32) as f64,
+    }
+}
+
+fn make_typed_array(source: Option<&JsValue>, kind: TypedArrayKind) -> JsValue {
+    let values = match source {
+        Some(JsValue::Array(items)) => items
+            .borrow()
+            .iter()
+            .map(|value| JsValue::Number(typed_array_number(value.to_number(), kind)))
+            .collect(),
+        Some(JsValue::Number(length)) if length.is_finite() && *length >= 0.0 => {
+            vec![JsValue::Number(0.0); (*length as usize).min(16_777_216)]
+        }
+        Some(other) => vec![JsValue::Number(typed_array_number(other.to_number(), kind))],
+        None => Vec::new(),
+    };
+    JsValue::new_array(values)
+}
+
 impl VM {
     pub fn new() -> Self {
         let global_env = Rc::new(RefCell::new(Environment::new()));
@@ -199,6 +232,34 @@ impl VM {
         self.globals.insert(
             "Array".to_string(),
             JsValue::Object(Rc::new(RefCell::new(array_obj))),
+        );
+
+        // Typed arrays used heavily by graphics/media workloads. Pulse currently
+        // stores them in the compact numeric array representation while preserving
+        // constructor coercion semantics needed by WebGL buffer uploads.
+        self.globals.insert(
+            "Float32Array".to_string(),
+            JsValue::native("Float32Array", |_vm, args| {
+                Ok(make_typed_array(args.first(), TypedArrayKind::Float32))
+            }),
+        );
+        self.globals.insert(
+            "Uint8Array".to_string(),
+            JsValue::native("Uint8Array", |_vm, args| {
+                Ok(make_typed_array(args.first(), TypedArrayKind::Uint8))
+            }),
+        );
+        self.globals.insert(
+            "Uint16Array".to_string(),
+            JsValue::native("Uint16Array", |_vm, args| {
+                Ok(make_typed_array(args.first(), TypedArrayKind::Uint16))
+            }),
+        );
+        self.globals.insert(
+            "Uint32Array".to_string(),
+            JsValue::native("Uint32Array", |_vm, args| {
+                Ok(make_typed_array(args.first(), TypedArrayKind::Uint32))
+            }),
         );
 
         // Promise built-in
