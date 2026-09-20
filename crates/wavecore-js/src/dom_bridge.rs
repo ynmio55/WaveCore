@@ -16,6 +16,7 @@ static ELEMENT_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 #[derive(Clone, Copy)]
 enum TimerKind {
     Timeout,
+    Interval(Duration),
     AnimationFrame,
 }
 
@@ -310,6 +311,41 @@ impl DomBridge {
         window.set("clearTimeout", clear_timeout_fn.clone());
         vm.set_global("clearTimeout", clear_timeout_fn);
 
+        let interval_timers = self.timer_callbacks.clone();
+        let set_interval_fn = JsValue::native("setInterval", move |_vm, args| {
+            if let Some(cb) = args.first().cloned() {
+                let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                let delay_ms = args
+                    .get(1)
+                    .map(|v| v.to_number().max(1.0))
+                    .unwrap_or(1.0)
+                    .min(86_400_000.0) as u64;
+                let period = Duration::from_millis(delay_ms);
+                interval_timers.borrow_mut().insert(
+                    id,
+                    TimerEntry {
+                        due: Instant::now() + period,
+                        callback: cb,
+                        kind: TimerKind::Interval(period),
+                    },
+                );
+                Ok(JsValue::Number(id as f64))
+            } else {
+                Ok(JsValue::Number(0.0))
+            }
+        });
+        window.set("setInterval", set_interval_fn.clone());
+        vm.set_global("setInterval", set_interval_fn);
+
+        let interval_clear = self.timer_callbacks.clone();
+        let clear_interval_fn = JsValue::native("clearInterval", move |_vm, args| {
+            let id = args.first().map(|a| a.to_number() as usize).unwrap_or(0);
+            interval_clear.borrow_mut().remove(&id);
+            Ok(JsValue::Undefined)
+        });
+        window.set("clearInterval", clear_interval_fn.clone());
+        vm.set_global("clearInterval", clear_interval_fn);
+
         // requestAnimationFrame / cancelAnimationFrame. The browser event loop batches
         // callbacks on a ~60 Hz cadence; the callback receives a monotonic timestamp.
         let raf_timers = self.timer_callbacks.clone();
@@ -433,17 +469,28 @@ impl DomBridge {
             let mut timers = self.timer_callbacks.borrow_mut();
             for id in due_ids {
                 if let Some(entry) = timers.remove(&id) {
-                    callbacks.push(entry);
+                    callbacks.push((id, entry));
                 }
             }
         }
 
         let count = callbacks.len();
         let timestamp_ms = self.time_origin.elapsed().as_secs_f64() * 1000.0;
-        for entry in callbacks {
+        for (id, entry) in callbacks {
             match entry.kind {
                 TimerKind::Timeout => {
                     let _ = vm.call_function(&entry.callback, &[]);
+                }
+                TimerKind::Interval(period) => {
+                    let _ = vm.call_function(&entry.callback, &[]);
+                    self.timer_callbacks.borrow_mut().insert(
+                        id,
+                        TimerEntry {
+                            due: Instant::now() + period,
+                            callback: entry.callback,
+                            kind: TimerKind::Interval(period),
+                        },
+                    );
                 }
                 TimerKind::AnimationFrame => {
                     let _ = vm.call_function(
