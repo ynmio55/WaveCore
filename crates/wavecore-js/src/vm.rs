@@ -32,6 +32,8 @@ pub struct VM {
     pub microtasks: VecDeque<Rc<dyn Fn(&mut VM) -> Result<(), String>>>,
     pub instruction_limit: usize,
     pub instruction_count: usize,
+    pub max_call_depth: usize,
+    pub max_microtasks_per_checkpoint: usize,
     pub console_output: Vec<String>,
 }
 
@@ -145,6 +147,8 @@ impl VM {
             microtasks: VecDeque::new(),
             instruction_limit: 1_000_000,
             instruction_count: 0,
+            max_call_depth: 512,
+            max_microtasks_per_checkpoint: 10_000,
             console_output: Vec::new(),
         };
 
@@ -525,7 +529,13 @@ impl VM {
     }
 
     pub fn drain_microtasks(&mut self) -> Result<(), String> {
+        let mut processed = 0usize;
         while let Some(task) = self.microtasks.pop_front() {
+            processed += 1;
+            if processed > self.max_microtasks_per_checkpoint {
+                self.microtasks.clear();
+                return Err("Execution terminated: microtask checkpoint exceeded configured limit".to_string());
+            }
             task(self)?;
         }
         Ok(())
@@ -540,6 +550,12 @@ impl VM {
         // function/native call. External callbacks (timers/rAF) start with no active
         // VM frame, so they still flush their microtasks before returning to the host.
         let should_drain_microtasks = self.frames.is_empty();
+        if matches!(callee, JsValue::Function(_)) && self.frames.len() >= self.max_call_depth {
+            return Err(format!(
+                "RangeError: maximum call stack size exceeded (limit {})",
+                self.max_call_depth
+            ));
+        }
         match callee {
             JsValue::Function(f) => {
                 let env = match &f.closure_env {
