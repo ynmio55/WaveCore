@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use wavecore_dom::Node;
 use wavecore_net::NetworkClient;
 use wavecore_sandbox::Origin;
-use wavecore_render::Canvas2DCommand;
+use wavecore_render::{Canvas2DCommand, WebGlCommand};
 
 use crate::value::{JsObject, JsPromise, JsValue};
 use crate::vm::VM;
@@ -27,6 +27,7 @@ pub struct DomBridge {
     timer_callbacks: Rc<RefCell<HashMap<usize, TimerEntry>>>,
     network_client: Rc<RefCell<NetworkClient>>,
     canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
+    webgl_commands: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
 }
 
 impl DomBridge {
@@ -39,6 +40,7 @@ impl DomBridge {
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
             network_client: Rc::new(RefCell::new(NetworkClient::new())),
             canvas_commands: Rc::new(RefCell::new(HashMap::new())),
+            webgl_commands: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -59,6 +61,7 @@ impl DomBridge {
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
             network_client,
             canvas_commands: Rc::new(RefCell::new(HashMap::new())),
+            webgl_commands: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -66,8 +69,13 @@ impl DomBridge {
         self.canvas_commands.borrow().clone()
     }
 
+    pub fn webgl_commands_snapshot(&self) -> HashMap<u64, Vec<WebGlCommand>> {
+        self.webgl_commands.borrow().clone()
+    }
+
     pub fn attach_to_vm(&self, vm: &mut VM) {
         let canvas_commands_ref = self.canvas_commands.clone();
+        let webgl_commands_ref = self.webgl_commands.clone();
         let root_ref = self.root.clone();
         let listeners_ref = self.listeners.clone();
         let url_ref = self.current_url.clone();
@@ -79,13 +87,15 @@ impl DomBridge {
         // document.getElementById(id)
         let r1 = root_ref.clone();
         let l1 = listeners_ref.clone();
+        let c1 = canvas_commands_ref.clone();
+        let w1 = webgl_commands_ref.clone();
         document.set(
             "getElementById",
             JsValue::native("getElementById", move |_vm, args| {
                 let id = args.first().map(|a| a.to_js_string()).unwrap_or_default();
                 let borrowed = r1.borrow();
                 if let Some(_node) = borrowed.find_by_id(&id) {
-                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone(), canvas_commands_ref.clone());
+                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone(), c1.clone(), w1.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -96,6 +106,8 @@ impl DomBridge {
         // document.querySelector(selector)
         let r2 = root_ref.clone();
         let l2 = listeners_ref.clone();
+        let c2 = canvas_commands_ref.clone();
+        let w2 = webgl_commands_ref.clone();
         document.set(
             "querySelector",
             JsValue::native("querySelector", move |_vm, args| {
@@ -113,7 +125,7 @@ impl DomBridge {
                     } else {
                         "".to_string()
                     };
-                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone(), canvas_commands_ref.clone());
+                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone(), c2.clone(), w2.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -124,6 +136,8 @@ impl DomBridge {
         // document.querySelectorAll(selector)
         let r_all = root_ref.clone();
         let l_all = listeners_ref.clone();
+        let c_all = canvas_commands_ref.clone();
+        let w_all = webgl_commands_ref.clone();
         document.set(
             "querySelectorAll",
             JsValue::native("querySelectorAll", move |_vm, args| {
@@ -155,7 +169,8 @@ impl DomBridge {
                         &html_id,
                         r_all.clone(),
                         l_all.clone(),
-                        canvas_commands_ref.clone(),
+                        c_all.clone(),
+                        w_all.clone(),
                     ));
                 }
 
@@ -166,6 +181,8 @@ impl DomBridge {
         // document.createElement(tagName)
         let r_create = root_ref.clone();
         let l_create = listeners_ref.clone();
+        let c_create = canvas_commands_ref.clone();
+        let w_create = webgl_commands_ref.clone();
         document.set(
             "createElement",
             JsValue::native("createElement", move |_vm, args| {
@@ -178,7 +195,7 @@ impl DomBridge {
                 // Store in root children temporarily as detached node
                 r_create.borrow_mut().append_child(new_node);
 
-                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone(), canvas_commands_ref.clone());
+                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone(), c_create.clone(), w_create.clone());
                 Ok(elem)
             }),
         );
@@ -537,6 +554,7 @@ fn create_element_wrapper(
     root: Rc<RefCell<Node>>,
     listeners: Rc<RefCell<HashMap<(String, String), Vec<JsValue>>>>,
     canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
+    webgl_commands: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
 ) -> JsValue {
     let mut elem_obj = JsObject::new();
     let elem_id = id.to_string();
@@ -772,6 +790,7 @@ fn create_element_wrapper(
 
     // getContext(type) for canvas elements
     let canvas_registry = canvas_commands.clone();
+    let webgl_registry = webgl_commands.clone();
     let canvas_node_id = internal_node_id;
     elem_obj.set(
         "getContext",
@@ -783,7 +802,10 @@ fn create_element_wrapper(
                     canvas_registry.clone(),
                 )))))
             } else if ctx_name == "webgl" || ctx_name == "experimental-webgl" {
-                Ok(JsValue::Object(Rc::new(RefCell::new(create_webgl_context()))))
+                Ok(JsValue::Object(Rc::new(RefCell::new(create_webgl_context(
+                    canvas_node_id,
+                    webgl_registry.clone(),
+                )))))
             } else {
                 Ok(JsValue::Null)
             }
@@ -906,41 +928,258 @@ fn create_canvas_2d_context(
     ctx
 }
 
-fn create_webgl_context() -> JsObject {
+fn create_webgl_context(
+    node_id: u64,
+    registry: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
+) -> JsObject {
     let mut gl = JsObject::new();
     gl.set("isWebGL", JsValue::Boolean(true));
-    gl.set("COLOR_BUFFER_BIT", JsValue::Number(16384.0));
-    gl.set("DEPTH_BUFFER_BIT", JsValue::Number(256.0));
-    gl.set("TRIANGLES", JsValue::Number(4.0));
-    gl.set("ARRAY_BUFFER", JsValue::Number(34962.0));
-    gl.set("STATIC_DRAW", JsValue::Number(35044.0));
+    gl.set("NO_ERROR", JsValue::Number(0.0));
+    gl.set("COLOR_BUFFER_BIT", JsValue::Number(0x4000 as f64));
+    gl.set("DEPTH_BUFFER_BIT", JsValue::Number(0x0100 as f64));
+    gl.set("TRIANGLES", JsValue::Number(0x0004 as f64));
+    gl.set("ARRAY_BUFFER", JsValue::Number(0x8892 as f64));
+    gl.set("STATIC_DRAW", JsValue::Number(0x88E4 as f64));
+    gl.set("FLOAT", JsValue::Number(0x1406 as f64));
+    gl.set("VERTEX_SHADER", JsValue::Number(0x8B31 as f64));
+    gl.set("FRAGMENT_SHADER", JsValue::Number(0x8B30 as f64));
+    gl.set("COMPILE_STATUS", JsValue::Number(0x8B81 as f64));
+    gl.set("LINK_STATUS", JsValue::Number(0x8B82 as f64));
 
-    gl.set("viewport", JsValue::native("viewport", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("clearColor", JsValue::native("clearColor", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("clear", JsValue::native("clear", |_vm, _args| Ok(JsValue::Undefined)));
+    let reg_viewport = registry.clone();
+    gl.set("viewport", JsValue::native("viewport", move |_vm, args| {
+        let x = args.get(0).map(|v| v.to_number() as i32).unwrap_or(0);
+        let y = args.get(1).map(|v| v.to_number() as i32).unwrap_or(0);
+        let width = args.get(2).map(|v| v.to_number() as i32).unwrap_or(0).max(0);
+        let height = args.get(3).map(|v| v.to_number() as i32).unwrap_or(0).max(0);
+        reg_viewport.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::Viewport { x, y, width, height }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_clear_color = registry.clone();
+    gl.set("clearColor", JsValue::native("clearColor", move |_vm, args| {
+        let color = [
+            args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0).clamp(0.0, 1.0),
+            args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0).clamp(0.0, 1.0),
+            args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0).clamp(0.0, 1.0),
+            args.get(3).map(|v| v.to_number() as f32).unwrap_or(0.0).clamp(0.0, 1.0),
+        ];
+        reg_clear_color.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::ClearColor(color)
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_clear = registry.clone();
+    gl.set("clear", JsValue::native("clear", move |_vm, args| {
+        let mask = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_clear.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::Clear { mask }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
     gl.set("createBuffer", JsValue::native("createBuffer", |_vm, _args| {
+        let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst) as u32;
         let mut buf = JsObject::new();
-        buf.set("_webglBufferId", JsValue::Number(1.0));
+        buf.set("_webglBufferId", JsValue::Number(id as f64));
         Ok(JsValue::Object(Rc::new(RefCell::new(buf))))
     }));
-    gl.set("bindBuffer", JsValue::native("bindBuffer", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("bufferData", JsValue::native("bufferData", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("createShader", JsValue::native("createShader", |_vm, _args| {
-        let mut s = JsObject::new();
-        s.set("_webglShaderId", JsValue::Number(1.0));
-        Ok(JsValue::Object(Rc::new(RefCell::new(s))))
+
+    let bound_buffer = Rc::new(Cell::new(None::<u32>));
+    let bound_for_bind = bound_buffer.clone();
+    let reg_bind = registry.clone();
+    gl.set("bindBuffer", JsValue::native("bindBuffer", move |_vm, args| {
+        let target = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
+        if target != 0x8892 {
+            return Ok(JsValue::Undefined);
+        }
+        let id = args.get(1).and_then(webgl_object_id);
+        bound_for_bind.set(id);
+        reg_bind.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::BindArrayBuffer(id)
+        );
+        Ok(JsValue::Undefined)
     }));
-    gl.set("shaderSource", JsValue::native("shaderSource", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("compileShader", JsValue::native("compileShader", |_vm, _args| Ok(JsValue::Undefined)));
+
+    let bound_for_data = bound_buffer.clone();
+    let reg_data = registry.clone();
+    gl.set("bufferData", JsValue::native("bufferData", move |_vm, args| {
+        let target = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
+        if target != 0x8892 {
+            return Ok(JsValue::Undefined);
+        }
+        let Some(id) = bound_for_data.get() else {
+            return Ok(JsValue::Undefined);
+        };
+        let data = args.get(1).map(js_number_vec).unwrap_or_default();
+        reg_data.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::UploadArrayBuffer { id, data }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("createShader", JsValue::native("createShader", |_vm, args| {
+        let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst) as u32;
+        let shader_type = args.first().map(|v| v.to_number()).unwrap_or(0.0);
+        let mut shader = JsObject::new();
+        shader.set("_webglShaderId", JsValue::Number(id as f64));
+        shader.set("_webglShaderType", JsValue::Number(shader_type));
+        shader.set("_webglSource", JsValue::String(String::new()));
+        shader.set("_webglCompiled", JsValue::Boolean(false));
+        Ok(JsValue::Object(Rc::new(RefCell::new(shader))))
+    }));
+
+    gl.set("shaderSource", JsValue::native("shaderSource", |_vm, args| {
+        if let Some(JsValue::Object(shader)) = args.first() {
+            let source = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+            shader.borrow_mut().set("_webglSource", JsValue::String(source));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("compileShader", JsValue::native("compileShader", |_vm, args| {
+        if let Some(JsValue::Object(shader)) = args.first() {
+            let source = shader.borrow().get("_webglSource").to_js_string();
+            shader.borrow_mut().set("_webglCompiled", JsValue::Boolean(!source.trim().is_empty()));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("getShaderParameter", JsValue::native("getShaderParameter", |_vm, args| {
+        if let Some(JsValue::Object(shader)) = args.first() {
+            return Ok(shader.borrow().get("_webglCompiled"));
+        }
+        Ok(JsValue::Boolean(false))
+    }));
+
+    gl.set("getShaderInfoLog", JsValue::native("getShaderInfoLog", |_vm, args| {
+        if let Some(JsValue::Object(shader)) = args.first() {
+            if shader.borrow().get("_webglCompiled").is_truthy() {
+                return Ok(JsValue::String(String::new()));
+            }
+        }
+        Ok(JsValue::String("WaveCore: shader source is empty or unsupported".to_string()))
+    }));
+
     gl.set("createProgram", JsValue::native("createProgram", |_vm, _args| {
-        let mut p = JsObject::new();
-        p.set("_webglProgramId", JsValue::Number(1.0));
-        Ok(JsValue::Object(Rc::new(RefCell::new(p))))
+        let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst) as u32;
+        let mut program = JsObject::new();
+        program.set("_webglProgramId", JsValue::Number(id as f64));
+        program.set("_webglAttachedCount", JsValue::Number(0.0));
+        program.set("_webglLinked", JsValue::Boolean(false));
+        Ok(JsValue::Object(Rc::new(RefCell::new(program))))
     }));
-    gl.set("attachShader", JsValue::native("attachShader", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("linkProgram", JsValue::native("linkProgram", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("useProgram", JsValue::native("useProgram", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("drawArrays", JsValue::native("drawArrays", |_vm, _args| Ok(JsValue::Undefined)));
+
+    gl.set("attachShader", JsValue::native("attachShader", |_vm, args| {
+        if let Some(JsValue::Object(program)) = args.first() {
+            let count = program.borrow().get("_webglAttachedCount").to_number();
+            program.borrow_mut().set("_webglAttachedCount", JsValue::Number(count + 1.0));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("linkProgram", JsValue::native("linkProgram", |_vm, args| {
+        if let Some(JsValue::Object(program)) = args.first() {
+            let linked = program.borrow().get("_webglAttachedCount").to_number() >= 2.0;
+            program.borrow_mut().set("_webglLinked", JsValue::Boolean(linked));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("getProgramParameter", JsValue::native("getProgramParameter", |_vm, args| {
+        if let Some(JsValue::Object(program)) = args.first() {
+            return Ok(program.borrow().get("_webglLinked"));
+        }
+        Ok(JsValue::Boolean(false))
+    }));
+
+    let reg_program = registry.clone();
+    gl.set("useProgram", JsValue::native("useProgram", move |_vm, args| {
+        let id = args.first().and_then(|value| match value {
+            JsValue::Object(object) => {
+                let raw = object.borrow().get("_webglProgramId").to_number();
+                raw.is_finite().then_some(raw as u32)
+            }
+            JsValue::Null => None,
+            _ => None,
+        });
+        reg_program.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::UseProgram(id)
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_pointer = registry.clone();
+    gl.set("vertexAttribPointer", JsValue::native("vertexAttribPointer", move |_vm, args| {
+        let index = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0);
+        let size = args.get(1).map(|v| v.to_number() as u32).unwrap_or(2).clamp(1, 4);
+        let stride_bytes = args.get(4).map(|v| v.to_number() as u32).unwrap_or(0);
+        let offset_bytes = args.get(5).map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_pointer.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::VertexAttribPointer {
+                index,
+                size,
+                stride_floats: stride_bytes / 4,
+                offset_floats: offset_bytes / 4,
+            }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_enable = registry.clone();
+    gl.set("enableVertexAttribArray", JsValue::native("enableVertexAttribArray", move |_vm, args| {
+        let index = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_enable.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::EnableVertexAttribArray(index)
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_draw = registry.clone();
+    gl.set("drawArrays", JsValue::native("drawArrays", move |_vm, args| {
+        let mode = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0x0004);
+        let first = args.get(1).map(|v| v.to_number() as u32).unwrap_or(0);
+        let count = args.get(2).map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_draw.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::DrawArrays { mode, first, count }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("getError", JsValue::native("getError", |_vm, _args| {
+        Ok(JsValue::Number(0.0))
+    }));
 
     gl
 }
+
+fn webgl_object_id(value: &JsValue) -> Option<u32> {
+    match value {
+        JsValue::Object(object) => {
+            let id = object.borrow().get("_webglBufferId").to_number();
+            id.is_finite().then_some(id as u32)
+        }
+        JsValue::Null => None,
+        _ => None,
+    }
+}
+
+fn js_number_vec(value: &JsValue) -> Vec<f32> {
+    match value {
+        JsValue::Array(items) => items
+            .borrow()
+            .iter()
+            .map(|item| item.to_number() as f32)
+            .filter(|number| number.is_finite())
+            .collect(),
+        _ => value
+            .to_js_string()
+            .split(',')
+            .filter_map(|part| part.trim().parse::<f32>().ok())
+            .collect(),
+    }
+}
+
