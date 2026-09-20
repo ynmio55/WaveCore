@@ -662,8 +662,8 @@ impl VM {
                 on_fulfilled,
                 on_rejected,
                 child,
-            } = reaction;
-            let next_state = match state {
+            } = reaction.clone();
+            let next_state = match state.clone() {
                 PromiseState::Fulfilled(value) => {
                     if let Some(callback) = on_fulfilled {
                         match vm.call_function(&callback, &[value]) {
@@ -717,6 +717,49 @@ impl VM {
             task(self)?;
         }
         Ok(())
+    }
+
+    fn call_function_with_this(
+        &mut self,
+        callee: &JsValue,
+        args: &[JsValue],
+        this_value: JsValue,
+    ) -> Result<JsValue, String> {
+        match callee {
+            JsValue::Function(f) => {
+                if self.frames.len() >= self.max_call_depth {
+                    return Err(format!(
+                        "RangeError: maximum call stack size exceeded (limit {})",
+                        self.max_call_depth
+                    ));
+                }
+                let env = match &f.closure_env {
+                    Some(parent) => Rc::new(RefCell::new(Environment::with_parent(parent.clone()))),
+                    None => Rc::new(RefCell::new(Environment::with_parent(self.current_env.clone()))),
+                };
+                env.borrow_mut().define("this", this_value);
+                for (i, param) in f.params.iter().enumerate() {
+                    env.borrow_mut().define(
+                        param.clone(),
+                        args.get(i).cloned().unwrap_or(JsValue::Undefined),
+                    );
+                }
+
+                let prev_env = self.current_env.clone();
+                self.current_env = env;
+                let target_depth = self.frames.len();
+                let stack_start = self.stack.len();
+                self.frames.push(CallFrame {
+                    chunk_index: f.chunk_index,
+                    ip: 0,
+                    stack_start,
+                    env: prev_env,
+                });
+                self.run_until(target_depth)
+            }
+            JsValue::NativeFunction(_, func) => func(self, args),
+            _ => Err(format!("'{}' is not callable", callee.to_js_string())),
+        }
     }
 
     pub fn call_function(
@@ -1026,6 +1069,77 @@ impl VM {
                         }
                     }
                 }
+                OpCode::Construct(arg_count) => {
+                    let mut args = Vec::new();
+                    for _ in 0..arg_count {
+                        args.push(self.stack.pop().unwrap_or(JsValue::Undefined));
+                    }
+                    args.reverse();
+                    let callee = self.stack.pop().unwrap_or(JsValue::Undefined);
+
+                    match callee {
+                        JsValue::NativeFunction(_, func) => match func(self, &args) {
+                            Ok(value) => self.stack.push(value),
+                            Err(error) => {
+                                self.unwind_exception(JsValue::String(error))?;
+                            }
+                        },
+                        JsValue::Object(class_obj) => {
+                            let is_class = class_obj.borrow().get("_isClass").is_truthy();
+                            if !is_class {
+                                self.unwind_exception(JsValue::String(
+                                    "TypeError: value is not a constructor".to_string(),
+                                ))?;
+                                continue;
+                            }
+
+                            let prototype = match class_obj.borrow().get("prototype") {
+                                JsValue::Object(proto) => Some(proto),
+                                _ => None,
+                            };
+                            let mut instance_object = JsObject::new();
+                            instance_object.proto = prototype;
+                            let instance = JsValue::Object(Rc::new(RefCell::new(instance_object)));
+
+                            let constructor = class_obj.borrow().get("_constructor");
+                            if matches!(constructor, JsValue::Function(_) | JsValue::NativeFunction(_, _)) {
+                                match self.call_function_with_this(
+                                    &constructor,
+                                    &args,
+                                    instance.clone(),
+                                ) {
+                                    Ok(JsValue::Object(returned)) => {
+                                        self.stack.push(JsValue::Object(returned));
+                                    }
+                                    Ok(_) => self.stack.push(instance),
+                                    Err(error) => {
+                                        self.unwind_exception(JsValue::String(error))?;
+                                    }
+                                }
+                            } else {
+                                self.stack.push(instance);
+                            }
+                        }
+                        JsValue::Function(function) => {
+                            let instance = JsValue::new_object();
+                            let callee = JsValue::Function(function);
+                            match self.call_function_with_this(&callee, &args, instance.clone()) {
+                                Ok(JsValue::Object(returned)) => {
+                                    self.stack.push(JsValue::Object(returned));
+                                }
+                                Ok(_) => self.stack.push(instance),
+                                Err(error) => {
+                                    self.unwind_exception(JsValue::String(error))?;
+                                }
+                            }
+                        }
+                        _ => {
+                            self.unwind_exception(JsValue::String(
+                                "TypeError: value is not a constructor".to_string(),
+                            ))?;
+                        }
+                    }
+                }
                 OpCode::Return => {
                     let ret = self.stack.pop().unwrap_or(JsValue::Undefined);
                     let finished_frame = self.frames.pop().unwrap();
@@ -1070,6 +1184,43 @@ impl VM {
                         closure_env: Some(self.current_env.clone()),
                     };
                     self.stack.push(JsValue::Function(Rc::new(func)));
+                }
+                OpCode::MakeClass {
+                    name,
+                    constructor,
+                    methods,
+                } => {
+                    let mut prototype = JsObject::new();
+                    for (method_name, chunk_index, params) in methods {
+                        let method = JsFunction {
+                            name: method_name.clone(),
+                            params,
+                            chunk_index,
+                            closure_env: Some(self.current_env.clone()),
+                        };
+                        prototype.set(method_name, JsValue::Function(Rc::new(method)));
+                    }
+                    let prototype = Rc::new(RefCell::new(prototype));
+
+                    let mut class = JsObject::new();
+                    class.set("_isClass", JsValue::Boolean(true));
+                    class.set("_className", JsValue::String(name.clone()));
+                    class.set("prototype", JsValue::Object(prototype));
+                    if let Some((chunk_index, params)) = constructor {
+                        class.set(
+                            "_constructor",
+                            JsValue::Function(Rc::new(JsFunction {
+                                name: format!("{name}.constructor"),
+                                params,
+                                chunk_index,
+                                closure_env: Some(self.current_env.clone()),
+                            })),
+                        );
+                    } else {
+                        class.set("_constructor", JsValue::Undefined);
+                    }
+                    self.stack
+                        .push(JsValue::Object(Rc::new(RefCell::new(class))));
                 }
                 OpCode::GetIndex => {
                     let index_val = self.stack.pop().unwrap_or(JsValue::Undefined);
@@ -1211,7 +1362,22 @@ impl VM {
                         }
                         JsValue::Object(obj) => {
                             let val = obj.borrow().get(&prop);
-                            self.stack.push(val);
+                            if let JsValue::Function(function) = val {
+                                let receiver = JsValue::Object(obj.clone());
+                                let function_value = JsValue::Function(function);
+                                self.stack.push(JsValue::native(
+                                    format!("bound:{prop}"),
+                                    move |vm, args| {
+                                        vm.call_function_with_this(
+                                            &function_value,
+                                            args,
+                                            receiver.clone(),
+                                        )
+                                    },
+                                ));
+                            } else {
+                                self.stack.push(val);
+                            }
                         }
                         JsValue::Array(arr) => {
                             match prop.as_str() {
