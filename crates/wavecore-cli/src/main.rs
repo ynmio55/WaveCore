@@ -7,7 +7,7 @@ use wavecore_js::{eval_script, DomBridge, JsObject, JsValue, VM};
 use wavecore_layout::{LayoutBox, Rect};
 use wavecore_net::{NavigationController, NetworkClient};
 use wavecore_pixels::{Rgba, Surface};
-use wavecore_render::DisplayCommand;
+use wavecore_render::{CompositorFrame, DisplayCommand};
 use wavecore_sandbox::Origin;
 use wavecore_storage::WebStorage;
 use wavecore_window::{BrowserWindow, WindowEvent};
@@ -116,14 +116,18 @@ fn layout_and_render(
     css: &str,
     width: f32,
     canvas_commands: &std::collections::HashMap<u64, Vec<wavecore_render::Canvas2DCommand>>,
-) -> (LayoutBox, Vec<DisplayCommand>) {
+) -> (LayoutBox, CompositorFrame, Vec<DisplayCommand>) {
     let sheet = wavecore_css::parse(css);
     let styled = wavecore_style::style_tree(dom, &sheet);
     let layout = wavecore_layout::layout(&styled, width);
-    let compositor_frame = wavecore_render::build_compositor_frame(&layout);
-    let mut display_list = compositor_frame.flatten();
-    wavecore_render::append_canvas_commands(&layout, canvas_commands, &mut display_list);
-    (layout, display_list)
+    let mut compositor_frame = wavecore_render::build_compositor_frame(&layout);
+    wavecore_render::append_canvas_to_compositor_frame(
+        &layout,
+        canvas_commands,
+        &mut compositor_frame,
+    );
+    let display_list = compositor_frame.flatten();
+    (layout, compositor_frame, display_list)
 }
 
 fn main() {
@@ -196,6 +200,11 @@ fn main() {
         });
 
         println!("WaveCore Browser Window opened (60 FPS).");
+        if let Some(adapter) = win.gpu_adapter_name() {
+            println!("GPU compositor: enabled via {adapter}");
+        } else {
+            println!("GPU compositor: unavailable; using software fallback");
+        }
         println!("Controls:");
         println!("  - Left Click: Click links (<a href>) or form inputs/buttons");
         println!("  - Typing: Enter text into focused form input");
@@ -214,12 +223,15 @@ fn main() {
         };
 
         let initial_canvas = state.bridge.canvas_commands_snapshot();
-        let (mut layout, mut display_list) =
+        let (mut layout, mut compositor_frame, mut display_list) =
             layout_and_render(&state.dom.borrow(), &full_css, width as f32, &initial_canvas);
         let mut surface = Surface::new(width as u32, height as u32);
-        surface.clear(Rgba(13, 17, 23, 255));
-        surface.paint(&display_list);
-        let _ = win.present(&surface);
+        let gpu_presented = win.present_compositor(&compositor_frame, 0.0).unwrap_or(false);
+        if !gpu_presented {
+            surface.clear(Rgba(13, 17, 23, 255));
+            surface.paint(&display_list);
+            let _ = win.present(&surface);
+        }
 
         let mut focused_rect: Option<Rect> = None;
 
@@ -496,14 +508,28 @@ fn main() {
 
             if needs_re_render {
                 let canvas_commands = state.bridge.canvas_commands_snapshot();
-                let (nl, nd) =
+                let (nl, nf, nd) =
                     layout_and_render(&state.dom.borrow(), &full_css, width as f32, &canvas_commands);
                 layout = nl;
+                compositor_frame = nf;
                 display_list = nd;
                 needs_repaint = true;
             }
 
             if needs_repaint {
+                if win.gpu_enabled() {
+                    match win.present_compositor(&compositor_frame, scroll_y) {
+                        Ok(true) => {
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            eprintln!("wavecore: GPU compositor failed, falling back to software: {error}");
+                            full_repaint = true;
+                        }
+                    }
+                }
+
                 if full_repaint || damage_doc.is_empty() {
                     // Damage is expressed in document coordinates so scrolling can be
                     // applied consistently by paint_damage_offset.
@@ -554,7 +580,7 @@ fn main() {
         };
 
         let canvas_commands = state.bridge.canvas_commands_snapshot();
-        let (layout, display_list) =
+        let (layout, _compositor_frame, display_list) =
             layout_and_render(&state.dom.borrow(), &full_css, 800.0, &canvas_commands);
 
         let render_height = (layout.rect.height as u32 + 100).max(600).min(4000);
