@@ -939,8 +939,11 @@ fn create_webgl_context(
     gl.set("DEPTH_BUFFER_BIT", JsValue::Number(0x0100 as f64));
     gl.set("TRIANGLES", JsValue::Number(0x0004 as f64));
     gl.set("ARRAY_BUFFER", JsValue::Number(0x8892 as f64));
+    gl.set("ELEMENT_ARRAY_BUFFER", JsValue::Number(0x8893 as f64));
     gl.set("STATIC_DRAW", JsValue::Number(0x88E4 as f64));
     gl.set("FLOAT", JsValue::Number(0x1406 as f64));
+    gl.set("UNSIGNED_SHORT", JsValue::Number(0x1403 as f64));
+    gl.set("UNSIGNED_INT", JsValue::Number(0x1405 as f64));
     gl.set("VERTEX_SHADER", JsValue::Number(0x8B31 as f64));
     gl.set("FRAGMENT_SHADER", JsValue::Number(0x8B30 as f64));
     gl.set("COMPILE_STATUS", JsValue::Number(0x8B81 as f64));
@@ -989,35 +992,57 @@ fn create_webgl_context(
     }));
 
     let bound_buffer = Rc::new(Cell::new(None::<u32>));
+    let bound_element_buffer = Rc::new(Cell::new(None::<u32>));
     let bound_for_bind = bound_buffer.clone();
+    let bound_element_for_bind = bound_element_buffer.clone();
     let reg_bind = registry.clone();
     gl.set("bindBuffer", JsValue::native("bindBuffer", move |_vm, args| {
         let target = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
-        if target != 0x8892 {
-            return Ok(JsValue::Undefined);
-        }
         let id = args.get(1).and_then(webgl_object_id);
-        bound_for_bind.set(id);
-        reg_bind.borrow_mut().entry(node_id).or_default().push(
-            WebGlCommand::BindArrayBuffer(id)
-        );
+        match target {
+            0x8892 => {
+                bound_for_bind.set(id);
+                reg_bind.borrow_mut().entry(node_id).or_default().push(
+                    WebGlCommand::BindArrayBuffer(id)
+                );
+            }
+            0x8893 => {
+                bound_element_for_bind.set(id);
+                reg_bind.borrow_mut().entry(node_id).or_default().push(
+                    WebGlCommand::BindElementArrayBuffer(id)
+                );
+            }
+            _ => {}
+        }
         Ok(JsValue::Undefined)
     }));
 
     let bound_for_data = bound_buffer.clone();
+    let bound_element_for_data = bound_element_buffer.clone();
     let reg_data = registry.clone();
     gl.set("bufferData", JsValue::native("bufferData", move |_vm, args| {
         let target = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
-        if target != 0x8892 {
-            return Ok(JsValue::Undefined);
+        match target {
+            0x8892 => {
+                let Some(id) = bound_for_data.get() else {
+                    return Ok(JsValue::Undefined);
+                };
+                let data = args.get(1).map(js_number_vec).unwrap_or_default();
+                reg_data.borrow_mut().entry(node_id).or_default().push(
+                    WebGlCommand::UploadArrayBuffer { id, data }
+                );
+            }
+            0x8893 => {
+                let Some(id) = bound_element_for_data.get() else {
+                    return Ok(JsValue::Undefined);
+                };
+                let data = args.get(1).map(js_u32_vec).unwrap_or_default();
+                reg_data.borrow_mut().entry(node_id).or_default().push(
+                    WebGlCommand::UploadElementArrayBuffer { id, data }
+                );
+            }
+            _ => {}
         }
-        let Some(id) = bound_for_data.get() else {
-            return Ok(JsValue::Undefined);
-        };
-        let data = args.get(1).map(js_number_vec).unwrap_or_default();
-        reg_data.borrow_mut().entry(node_id).or_default().push(
-            WebGlCommand::UploadArrayBuffer { id, data }
-        );
         Ok(JsValue::Undefined)
     }));
 
@@ -1166,6 +1191,18 @@ fn create_webgl_context(
         Ok(JsValue::Undefined)
     }));
 
+    let reg_draw_elements = registry.clone();
+    gl.set("drawElements", JsValue::native("drawElements", move |_vm, args| {
+        let mode = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0x0004);
+        let count = args.get(1).map(|v| v.to_number() as u32).unwrap_or(0);
+        let element_type = args.get(2).map(|v| v.to_number() as u32).unwrap_or(0x1403);
+        let offset_bytes = args.get(3).map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_draw_elements.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::DrawElements { mode, count, element_type, offset_bytes }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
     gl.set("getError", JsValue::native("getError", |_vm, _args| {
         Ok(JsValue::Number(0.0))
     }));
@@ -1181,6 +1218,23 @@ fn webgl_object_id(value: &JsValue) -> Option<u32> {
         }
         JsValue::Null => None,
         _ => None,
+    }
+}
+
+fn js_u32_vec(value: &JsValue) -> Vec<u32> {
+    match value {
+        JsValue::Array(items) => items
+            .borrow()
+            .iter()
+            .map(|item| item.to_number())
+            .filter(|number| number.is_finite() && *number >= 0.0)
+            .map(|number| number as u32)
+            .collect(),
+        _ => value
+            .to_js_string()
+            .split(',')
+            .filter_map(|part| part.trim().parse::<u32>().ok())
+            .collect(),
     }
 }
 
