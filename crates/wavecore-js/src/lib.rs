@@ -230,4 +230,28 @@ mod tests {
         assert_eq!(result, JsValue::Number(260.25));
     }
 
+    #[test]
+    fn request_animation_frame_runs_with_timestamp() {
+        let root = Rc::new(RefCell::new(Node::document(vec![])));
+        let bridge = DomBridge::new(root);
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        eval_script(
+            r#"
+                let frameTime = -1;
+                requestAnimationFrame(function(ts) {
+                    frameTime = ts;
+                });
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(bridge.dispatch_due_timers(&mut vm), 1);
+        let result = eval_script("frameTime;", &mut vm).unwrap();
+        assert!(matches!(result, JsValue::Number(v) if v >= 0.0));
+    }
+
 }
