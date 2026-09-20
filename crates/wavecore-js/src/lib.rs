@@ -305,4 +305,21 @@ mod tests {
         assert_eq!(bridge.dispatch_due_timers(&mut vm), 0);
     }
 
+    #[test]
+    fn object_helpers_and_array_from_work() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let src = { b: 2, a: 1 };
+                let dst = Object.assign({ c: 3 }, src);
+                let keys = Object.keys(dst);
+                let chars = Array.from("WC");
+                keys.length + chars.length + dst.a + dst.b + dst.c;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::Number(11.0));
+    }
+
 }
