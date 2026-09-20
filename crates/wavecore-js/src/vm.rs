@@ -1011,6 +1011,72 @@ impl VM {
                                         Ok(JsValue::Undefined)
                                     }));
                                 }
+                                "filter" => {
+                                    let a_ref = arr.clone();
+                                    self.stack.push(JsValue::native("filter", move |vm, args| {
+                                        let Some(callback) = args.first().cloned() else {
+                                            return Ok(JsValue::new_array(Vec::new()));
+                                        };
+                                        let items = a_ref.borrow().clone();
+                                        let mut result = Vec::new();
+                                        for (i, item) in items.iter().enumerate() {
+                                            let keep = vm.call_function(
+                                                &callback,
+                                                &[item.clone(), JsValue::Number(i as f64)],
+                                            )?;
+                                            if keep.is_truthy() {
+                                                result.push(item.clone());
+                                            }
+                                        }
+                                        Ok(JsValue::new_array(result))
+                                    }));
+                                }
+                                "reduce" => {
+                                    let a_ref = arr.clone();
+                                    self.stack.push(JsValue::native("reduce", move |vm, args| {
+                                        let Some(callback) = args.first().cloned() else {
+                                            return Ok(JsValue::Undefined);
+                                        };
+                                        let items = a_ref.borrow().clone();
+                                        if items.is_empty() && args.get(1).is_none() {
+                                            return Err("TypeError: reduce of empty array with no initial value".to_string());
+                                        }
+                                        let mut index = 0usize;
+                                        let mut accumulator = if let Some(initial) = args.get(1) {
+                                            initial.clone()
+                                        } else {
+                                            index = 1;
+                                            items.first().cloned().unwrap_or(JsValue::Undefined)
+                                        };
+                                        while index < items.len() {
+                                            accumulator = vm.call_function(
+                                                &callback,
+                                                &[
+                                                    accumulator,
+                                                    items[index].clone(),
+                                                    JsValue::Number(index as f64),
+                                                ],
+                                            )?;
+                                            index += 1;
+                                        }
+                                        Ok(accumulator)
+                                    }));
+                                }
+                                "slice" => {
+                                    let a_ref = arr.clone();
+                                    self.stack.push(JsValue::native("slice", move |_vm, args| {
+                                        let items = a_ref.borrow();
+                                        let len = items.len() as isize;
+                                        let normalize = |value: Option<&JsValue>, default: isize| {
+                                            let raw = value.map(|v| v.to_number() as isize).unwrap_or(default);
+                                            if raw < 0 { (len + raw).max(0) } else { raw.min(len) }
+                                        };
+                                        let start = normalize(args.get(0), 0) as usize;
+                                        let end = normalize(args.get(1), len) as usize;
+                                        let end = end.max(start).min(items.len());
+                                        Ok(JsValue::new_array(items[start..end].to_vec()))
+                                    }));
+                                }
                                 _ => self.stack.push(JsValue::Undefined),
                             }
                         }
@@ -1066,6 +1132,28 @@ impl VM {
                                     self.stack.push(JsValue::native("includes", move |_vm, args| {
                                         let needle = args.first().map(|v| v.to_js_string()).unwrap_or_default();
                                         Ok(JsValue::Boolean(str_val.contains(&needle)))
+                                    }));
+                                }
+                                "startsWith" => {
+                                    let str_val = s.clone();
+                                    self.stack.push(JsValue::native("startsWith", move |_vm, args| {
+                                        let needle = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                                        Ok(JsValue::Boolean(str_val.starts_with(&needle)))
+                                    }));
+                                }
+                                "endsWith" => {
+                                    let str_val = s.clone();
+                                    self.stack.push(JsValue::native("endsWith", move |_vm, args| {
+                                        let needle = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                                        Ok(JsValue::Boolean(str_val.ends_with(&needle)))
+                                    }));
+                                }
+                                "replace" => {
+                                    let str_val = s.clone();
+                                    self.stack.push(JsValue::native("replace", move |_vm, args| {
+                                        let from = args.get(0).map(|v| v.to_js_string()).unwrap_or_default();
+                                        let to = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+                                        Ok(JsValue::String(str_val.replacen(&from, &to, 1)))
                                     }));
                                 }
                                 _ => self.stack.push(JsValue::Undefined),
