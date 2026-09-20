@@ -1297,13 +1297,29 @@ fn create_element_wrapper(
 
     let r_set = root.clone();
     let id_set = elem_id.clone();
+    let observers_set_text = mutation_observers.clone();
     elem_obj.set(
         "setInnerText",
-        JsValue::native("setInnerText", move |_vm, args| {
+        JsValue::native("setInnerText", move |vm, args| {
             let text = args.first().map(|a| a.to_js_string()).unwrap_or_default();
-            let mut borrowed = r_set.borrow_mut();
-            if let Some(node) = borrowed.find_by_id_mut(&id_set) {
-                node.set_inner_text(&text);
+            let changed = {
+                let mut borrowed = r_set.borrow_mut();
+                if let Some(node) = borrowed.find_by_id_mut(&id_set) {
+                    node.set_inner_text(&text);
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                queue_mutation_observers(
+                    vm,
+                    &r_set,
+                    &observers_set_text,
+                    &id_set,
+                    "characterData",
+                    None,
+                );
             }
             Ok(JsValue::Undefined)
         }),
@@ -1362,16 +1378,34 @@ fn create_element_wrapper(
 
     let r_setattr = root.clone();
     let id_setattr = elem_id.clone();
+    let observers_setattr = mutation_observers.clone();
     elem_obj.set(
         "setAttribute",
-        JsValue::native("setAttribute", move |_vm, args| {
+        JsValue::native("setAttribute", move |vm, args| {
             let attr = args.first().map(|a| a.to_js_string()).unwrap_or_default();
             let val = args.get(1).map(|a| a.to_js_string()).unwrap_or_default();
-            let mut borrowed = r_setattr.borrow_mut();
-            if let Some(node) = borrowed.find_by_id_mut(&id_setattr) {
-                if let wavecore_dom::NodeType::Element(e) = &mut node.node_type {
-                    e.set_attribute(attr, val);
+            let changed = {
+                let mut borrowed = r_setattr.borrow_mut();
+                if let Some(node) = borrowed.find_by_id_mut(&id_setattr) {
+                    if let wavecore_dom::NodeType::Element(e) = &mut node.node_type {
+                        e.set_attribute(attr.clone(), val);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
                 }
+            };
+            if changed {
+                queue_mutation_observers(
+                    vm,
+                    &r_setattr,
+                    &observers_setattr,
+                    &id_setattr,
+                    "attributes",
+                    Some(&attr),
+                );
             }
             Ok(JsValue::Undefined)
         }),
@@ -1442,9 +1476,11 @@ fn create_element_wrapper(
     // appendChild(child): re-parent the existing node instead of cloning it.
     let r_append = root.clone();
     let id_append = elem_id.clone();
+    let observers_append = mutation_observers.clone();
     elem_obj.set(
         "appendChild",
-        JsValue::native("appendChild", move |_vm, args| {
+        JsValue::native("appendChild", move |vm, args| {
+            let mut changed = false;
             if let Some(JsValue::Object(child_obj)) = args.first() {
                 let child_id = child_obj.borrow().get("id").to_js_string();
                 if !child_id.is_empty() && child_id != id_append {
@@ -1454,10 +1490,21 @@ fn create_element_wrapper(
                         if let Some(child_node) = borrowed.detach_by_id(child_node_id) {
                             if let Some(parent_node) = borrowed.find_by_id_mut(&id_append) {
                                 parent_node.append_child(child_node);
+                                changed = true;
                             }
                         }
                     }
                 }
+            }
+            if changed {
+                queue_mutation_observers(
+                    vm,
+                    &r_append,
+                    &observers_append,
+                    &id_append,
+                    "childList",
+                    None,
+                );
             }
             Ok(JsValue::Undefined)
         }),
