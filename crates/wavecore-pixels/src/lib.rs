@@ -56,6 +56,18 @@ impl Surface {
         }
     }
 
+    pub fn blank_like(&self, width: u32, height: u32, color: Rgba) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![color; (width * height) as usize],
+            clip_stack: Vec::new(),
+            opacity_stack: vec![1.0],
+            damage_rects: Vec::new(),
+            fonts: self.fonts.clone(),
+        }
+    }
+
     pub fn clear(&mut self, color: Rgba) {
         self.pixels.fill(color);
         self.clip_stack.clear();
@@ -200,17 +212,6 @@ impl Surface {
                             col,
                         );
                     }
-                    DisplayCommand::FillRoundedRect { rect, radius, color } => {
-                    let col = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
-                    self.fill_rounded_rect(
-                        rect.x + offset_x,
-                        rect.y + offset_y,
-                        rect.width,
-                        rect.height,
-                        *radius,
-                        col,
-                    );
-                }
                 DisplayCommand::Border { rect, widths, color, radius: _ } => {
                         let col = self.effective_color(parse_color(color).unwrap_or(Rgba(0, 0, 0, 255)));
                         let rx = rect.x + offset_x;
@@ -415,12 +416,29 @@ impl Surface {
         }
         let idx = (y as u32 * self.width + x as u32) as usize;
         let bg = self.pixels[idx];
-        let a = (alpha_mask as u32 * color.3 as u32) / 255;
-        let inv_a = 255 - a;
-        let r = ((color.0 as u32 * a + bg.0 as u32 * inv_a) / 255) as u8;
-        let g = ((color.1 as u32 * a + bg.1 as u32 * inv_a) / 255) as u8;
-        let b = ((color.2 as u32 * a + bg.2 as u32 * inv_a) / 255) as u8;
-        self.pixels[idx] = Rgba(r, g, b, 255);
+
+        let src_a = (alpha_mask as f32 / 255.0) * (color.3 as f32 / 255.0);
+        let dst_a = bg.3 as f32 / 255.0;
+        let out_a = src_a + dst_a * (1.0 - src_a);
+        if out_a <= f32::EPSILON {
+            self.pixels[idx] = Rgba(0, 0, 0, 0);
+            return;
+        }
+
+        let blend = |src: u8, dst: u8| -> u8 {
+            let src = src as f32 / 255.0;
+            let dst = dst as f32 / 255.0;
+            (((src * src_a + dst * dst_a * (1.0 - src_a)) / out_a) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+
+        self.pixels[idx] = Rgba(
+            blend(color.0, bg.0),
+            blend(color.1, bg.1),
+            blend(color.2, bg.2),
+            (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+        );
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba) {
