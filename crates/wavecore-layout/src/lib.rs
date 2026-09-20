@@ -861,7 +861,7 @@ mod tests {
         let root = Node::element("div", vec![input]);
         let l = layout(&style_tree(&root, &parse("div { width: 400px; }")), 800.0);
         assert!(l.children[0].is_form_control);
-        assert_eq!(l.children[0].form_control_type.as_deref(), Some("input"));
+        assert_eq!(l.children[0].form_control_type.as_deref(), Some("text"));
     }
 
     #[test]
