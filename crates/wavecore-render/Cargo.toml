@@ -5,3 +5,8 @@ edition.workspace = true
 
 [dependencies]
 wavecore-layout = { path = "../wavecore-layout" }
+
+[dev-dependencies]
+wavecore-dom = { path = "../wavecore-dom" }
+wavecore-style = { path = "../wavecore-style" }
+wavecore-css = { path = "../wavecore-css" }
