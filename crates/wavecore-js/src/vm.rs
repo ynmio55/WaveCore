@@ -1303,71 +1303,86 @@ impl VM {
                                     self.stack.push(JsValue::native("then", move |vm, args| {
                                         let on_fulfilled = args.first().cloned();
                                         let on_rejected = args.get(1).cloned();
+                                        let child = Rc::new(RefCell::new(JsPromise::pending()));
+                                        let child_for_task = child.clone();
                                         let state = p.borrow().state.clone();
+
                                         match state {
-                                            PromiseState::Fulfilled(val) => {
-                                                if let Some(cb) = on_fulfilled {
-                                                    let next_val = vm.call_function(&cb, &[val])?;
-                                                    let unwrapped = if let JsValue::Promise(inner_p) = next_val {
-                                                        match &inner_p.borrow().state {
-                                                            PromiseState::Fulfilled(v) => v.clone(),
-                                                            PromiseState::Rejected(err) => return Err(err.to_js_string()),
-                                                            PromiseState::Pending => JsValue::Undefined,
+                                            PromiseState::Fulfilled(value) => {
+                                                vm.queue_microtask(move |vm| {
+                                                    let next_state = if let Some(callback) = on_fulfilled {
+                                                        match vm.call_function(&callback, &[value.clone()]) {
+                                                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
+                                                            Ok(value) => PromiseState::Fulfilled(value),
+                                                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
                                                         }
                                                     } else {
-                                                        next_val
+                                                        PromiseState::Fulfilled(value.clone())
                                                     };
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::resolved(unwrapped),
-                                                    ))))
-                                                } else {
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::resolved(val),
-                                                    ))))
-                                                }
+                                                    child_for_task.borrow_mut().state = next_state;
+                                                    Ok(())
+                                                });
                                             }
-                                            PromiseState::Rejected(err) => {
-                                                if let Some(cb) = on_rejected {
-                                                    let handled = vm.call_function(&cb, &[err])?;
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::resolved(handled),
-                                                    ))))
-                                                } else {
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::rejected(err),
-                                                    ))))
-                                                }
+                                            PromiseState::Rejected(error) => {
+                                                vm.queue_microtask(move |vm| {
+                                                    let next_state = if let Some(callback) = on_rejected {
+                                                        match vm.call_function(&callback, &[error.clone()]) {
+                                                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
+                                                            Ok(value) => PromiseState::Fulfilled(value),
+                                                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
+                                                        }
+                                                    } else {
+                                                        PromiseState::Rejected(error.clone())
+                                                    };
+                                                    child_for_task.borrow_mut().state = next_state;
+                                                    Ok(())
+                                                });
                                             }
                                             PromiseState::Pending => {
-                                                let new_p = Rc::new(RefCell::new(JsPromise::pending()));
-                                                if let Some(cb) = on_fulfilled {
-                                                    p.borrow_mut().then_callbacks.push((cb, on_rejected));
+                                                // Pending promise chaining is retained for sources that
+                                                // resolve later; callbacks are registered and never run
+                                                // synchronously.
+                                                if let Some(callback) = on_fulfilled {
+                                                    p.borrow_mut().then_callbacks.push((callback, on_rejected));
                                                 }
-                                                Ok(JsValue::Promise(new_p))
                                             }
                                         }
+                                        Ok(JsValue::Promise(child))
                                     }));
                                 }
                                 "catch" => {
                                     let p = promise.clone();
                                     self.stack.push(JsValue::native("catch", move |vm, args| {
                                         let on_rejected = args.first().cloned();
+                                        let child = Rc::new(RefCell::new(JsPromise::pending()));
+                                        let child_for_task = child.clone();
                                         let state = p.borrow().state.clone();
                                         match state {
-                                            PromiseState::Rejected(err) => {
-                                                if let Some(cb) = on_rejected {
-                                                    let handled = vm.call_function(&cb, &[err])?;
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::resolved(handled),
-                                                    ))))
-                                                } else {
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::rejected(err),
-                                                    ))))
-                                                }
+                                            PromiseState::Rejected(error) => {
+                                                vm.queue_microtask(move |vm| {
+                                                    let next_state = if let Some(callback) = on_rejected {
+                                                        match vm.call_function(&callback, &[error.clone()]) {
+                                                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
+                                                            Ok(value) => PromiseState::Fulfilled(value),
+                                                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
+                                                        }
+                                                    } else {
+                                                        PromiseState::Rejected(error.clone())
+                                                    };
+                                                    child_for_task.borrow_mut().state = next_state;
+                                                    Ok(())
+                                                });
                                             }
-                                            _ => Ok(JsValue::Promise(p.clone())),
+                                            PromiseState::Fulfilled(value) => {
+                                                vm.queue_microtask(move |_vm| {
+                                                    child_for_task.borrow_mut().state =
+                                                        PromiseState::Fulfilled(value.clone());
+                                                    Ok(())
+                                                });
+                                            }
+                                            PromiseState::Pending => {}
                                         }
+                                        Ok(JsValue::Promise(child))
                                     }));
                                 }
                                 _ => self.stack.push(JsValue::Undefined),
