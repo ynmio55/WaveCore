@@ -261,17 +261,18 @@ mod tests {
         let mut vm = VM::new();
         bridge.attach_to_vm(&mut vm);
 
-        let result = eval_script(
+        eval_script(
             r#"
                 let observed = 0;
+                let perfOk = performance.now() >= 0 ? 1 : 0;
                 queueMicrotask(function() { observed = 7; });
-                let t = performance.now();
-                observed + (t >= 0 ? 1 : 0);
             "#,
             &mut vm,
         )
         .unwrap();
 
+        // eval_script drains the VM microtask queue after the current script turn.
+        let result = eval_script("observed + perfOk;", &mut vm).unwrap();
         assert_eq!(result, JsValue::Number(8.0));
     }
 
