@@ -601,7 +601,7 @@ mod tests {
         .unwrap();
 
         let result = eval_script(
-            "fetchedStatus + (parsedOk ? 10 : 0) + responseStatus + byteLength + (headers.get("x-wave") == "core, engine" ? 1 : 0);",
+            r#"fetchedStatus + (parsedOk ? 10 : 0) + responseStatus + byteLength + (headers.get("x-wave") == "core, engine" ? 1 : 0);"#,
             &mut vm,
         )
         .unwrap();
@@ -622,6 +622,67 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, JsValue::Number(1237.0));
+    }
+
+    #[test]
+    fn class_constructor_and_instance_methods_work() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                class Counter {
+                    constructor(start) {
+                        this.value = start;
+                    }
+                    inc(step) {
+                        this.value = this.value + step;
+                        return this.value;
+                    }
+                }
+
+                let counter = new Counter(4);
+                counter.inc(3) + counter.value;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(result, JsValue::Number(14.0));
+    }
+
+    #[test]
+    fn mutation_observer_receives_attribute_and_text_records_as_microtasks() {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("id".to_string(), "target".to_string());
+        let target = Node::element_with_attributes("div", attrs, vec![Node::text("before")]);
+        let root = Rc::new(RefCell::new(Node::document(vec![target])));
+        let bridge = DomBridge::new(root);
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        let first = eval_script(
+            r#"
+                let target = document.getElementById("target");
+                let observed = "";
+                let observer = new MutationObserver(function(records) {
+                    observed = observed + records[0].type + ";";
+                });
+                observer.observe(target, {
+                    attributes: true,
+                    characterData: true
+                });
+                target.setAttribute("data-ready", "yes");
+                target.setInnerText("after");
+                observed;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(first, JsValue::String(String::new()));
+        assert_eq!(
+            eval_script("observed;", &mut vm).unwrap(),
+            JsValue::String("attributes;characterData;".to_string())
+        );
     }
 
 }
