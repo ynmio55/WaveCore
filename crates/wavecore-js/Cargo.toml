@@ -10,3 +10,5 @@ wavecore-dom = { path = "../wavecore-dom" }
 wavecore-net = { path = "../wavecore-net" }
 wavecore-sandbox = { path = "../wavecore-sandbox" }
 wavecore-render = { path = "../wavecore-render" }
+
+serde_json = "1"
