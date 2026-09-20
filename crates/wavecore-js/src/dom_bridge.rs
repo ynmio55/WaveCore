@@ -1113,6 +1113,7 @@ fn create_webgl_context(
     }));
 
     let reg_pointer = registry.clone();
+    let bound_for_pointer = bound_buffer.clone();
     gl.set("vertexAttribPointer", JsValue::native("vertexAttribPointer", move |_vm, args| {
         let index = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0);
         let size = args.get(1).map(|v| v.to_number() as u32).unwrap_or(2).clamp(1, 4);
@@ -1124,7 +1125,23 @@ fn create_webgl_context(
                 size,
                 stride_floats: stride_bytes / 4,
                 offset_floats: offset_bytes / 4,
+                buffer_id: bound_for_pointer.get(),
             }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_attr4f = registry.clone();
+    gl.set("vertexAttrib4f", JsValue::native("vertexAttrib4f", move |_vm, args| {
+        let index = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0);
+        let value = [
+            args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0),
+            args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0),
+            args.get(3).map(|v| v.to_number() as f32).unwrap_or(0.0),
+            args.get(4).map(|v| v.to_number() as f32).unwrap_or(1.0),
+        ];
+        reg_attr4f.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::VertexAttrib4f { index, value }
         );
         Ok(JsValue::Undefined)
     }));
