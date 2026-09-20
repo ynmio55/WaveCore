@@ -22,6 +22,7 @@ struct WebGlVertex {
 struct GpuWebGlDraw {
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
+    scissor: (u32, u32, u32, u32),
 }
 
 struct GpuLayer {
@@ -523,9 +524,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 if !layer.webgl_draws.is_empty() {
                     pass.set_pipeline(&self.webgl_pipeline);
                     for draw in &layer.webgl_draws {
+                        let (x, y, width, height) = draw.scissor;
+                        if width == 0 || height == 0 {
+                            continue;
+                        }
+                        pass.set_scissor_rect(x, y, width, height);
                         pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
                         pass.draw(0..draw.vertex_count, 0..1);
                     }
+                    pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
                 }
             }
         }
@@ -630,6 +637,7 @@ fn build_webgl_draws(
                 draws.push(GpuWebGlDraw {
                     vertex_buffer,
                     vertex_count: vertices.len() as u32,
+                    scissor: layer_scissor(bounds, scroll_y, viewport_width, viewport_height),
                 });
             }
             WebGlCommand::UploadArrayBuffer { id, data } => {
@@ -776,6 +784,7 @@ fn build_webgl_draws(
                     draws.push(GpuWebGlDraw {
                         vertex_buffer,
                         vertex_count: vertices.len() as u32,
+                        scissor: layer_scissor(bounds, scroll_y, viewport_width, viewport_height),
                     });
                 }
             }
@@ -784,6 +793,26 @@ fn build_webgl_draws(
     }
 
     draws
+}
+
+fn layer_scissor(
+    bounds: Rect,
+    scroll_y: f32,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> (u32, u32, u32, u32) {
+    let x0 = bounds.x.max(0.0).min(viewport_width);
+    let y0 = (bounds.y - scroll_y).max(0.0).min(viewport_height);
+    let x1 = (bounds.x + bounds.width).max(0.0).min(viewport_width);
+    let y1 = (bounds.y - scroll_y + bounds.height)
+        .max(0.0)
+        .min(viewport_height);
+    (
+        x0.floor() as u32,
+        y0.floor() as u32,
+        (x1 - x0).max(0.0).ceil() as u32,
+        (y1 - y0).max(0.0).ceil() as u32,
+    )
 }
 
 fn solid_quad_vertices(
