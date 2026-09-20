@@ -132,7 +132,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result, JsValue::Number(200.0));
+        assert_eq!(result, JsValue::Number(0.0));
+        assert_eq!(eval_script("observed;", &mut vm).unwrap(), JsValue::Number(200.0));
     }
 
     #[test]
@@ -358,7 +359,8 @@ mod tests {
             &mut vm,
         )
         .unwrap();
-        assert_eq!(result, JsValue::Number(19.0));
+        assert_eq!(result, JsValue::Number(0.0));
+        assert_eq!(eval_script("total + winner;", &mut vm).unwrap(), JsValue::Number(19.0));
     }
 
     #[test]
@@ -384,7 +386,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result, JsValue::Number(42.0));
+        assert_eq!(result, JsValue::Number(0.0));
+        assert_eq!(eval_script("value;", &mut vm).unwrap(), JsValue::Number(42.0));
     }
 
     #[test]
