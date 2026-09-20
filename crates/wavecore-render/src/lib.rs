@@ -8,6 +8,24 @@ pub enum Canvas2DCommand {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum WebGlCommand {
+    Viewport { x: i32, y: i32, width: i32, height: i32 },
+    ClearColor([f32; 4]),
+    Clear { mask: u32 },
+    UploadArrayBuffer { id: u32, data: Vec<f32> },
+    BindArrayBuffer(Option<u32>),
+    VertexAttribPointer {
+        index: u32,
+        size: u32,
+        stride_floats: u32,
+        offset_floats: u32,
+    },
+    EnableVertexAttribArray(u32),
+    UseProgram(Option<u32>),
+    DrawArrays { mode: u32, first: u32, count: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {
     FillRect { rect: Rect, color: String },
     FillRoundedRect { rect: Rect, radius: f32, color: String },
@@ -30,6 +48,7 @@ pub struct CompositorLayer {
     pub opacity: f32,
     pub bounds: Rect,
     pub commands: Vec<DisplayCommand>,
+    pub webgl_commands: Vec<WebGlCommand>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,6 +94,7 @@ fn collect_layers(layout: &LayoutBox, layers: &mut Vec<CompositorLayer>) {
         opacity: layout.opacity,
         bounds: layout.rect,
         commands,
+        webgl_commands: Vec::new(),
     });
 
     let mut children: Vec<&LayoutBox> = layout.children.iter().collect();
@@ -269,6 +289,30 @@ pub fn append_canvas_to_compositor_frame(
 
     for child in &layout.children {
         append_canvas_to_compositor_frame(child, registry, frame);
+    }
+}
+
+
+pub fn append_webgl_to_compositor_frame(
+    layout: &LayoutBox,
+    registry: &HashMap<u64, Vec<WebGlCommand>>,
+    frame: &mut CompositorFrame,
+) {
+    if layout.is_canvas {
+        if let Some(node_id) = layout.node_id.map(|id| id.0) {
+            if let Some(commands) = registry.get(&node_id) {
+                if let Some(layer) = frame
+                    .layers
+                    .iter_mut()
+                    .find(|layer| layer.node_id == Some(node_id))
+                {
+                    layer.webgl_commands = commands.clone();
+                }
+            }
+        }
+    }
+    for child in &layout.children {
+        append_webgl_to_compositor_frame(child, registry, frame);
     }
 }
 
