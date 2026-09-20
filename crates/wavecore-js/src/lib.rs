@@ -434,4 +434,58 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn common_array_and_string_methods_work() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let values = [1, 2, 3, 4, 5];
+                let filtered = values.filter(function(v) { return v > 2; });
+                let reduced = filtered.reduce(function(acc, v) { return acc + v; }, 0);
+                let sliced = values.slice(1, 4);
+                let s = "WaveCore Browser";
+                reduced
+                    + sliced.length
+                    + (s.startsWith("Wave") ? 1 : 0)
+                    + (s.endsWith("Browser") ? 1 : 0)
+                    + (s.replace("Browser", "Engine") == "WaveCore Engine" ? 1 : 0);
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::Number(18.0));
+    }
+
+    #[test]
+    fn javascript_call_depth_is_bounded() {
+        let mut vm = VM::new();
+        vm.max_call_depth = 32;
+        let err = eval_script(
+            r#"
+                function recurse(n) {
+                    return recurse(n + 1);
+                }
+                recurse(0);
+            "#,
+            &mut vm,
+        )
+        .unwrap_err();
+        assert!(err.contains("maximum call stack size exceeded"));
+    }
+
+    #[test]
+    fn microtask_checkpoint_has_resource_limit() {
+        let mut vm = VM::new();
+        vm.max_microtasks_per_checkpoint = 2;
+        vm.queue_microtask(|vm| {
+            vm.queue_microtask(|vm| {
+                vm.queue_microtask(|_vm| Ok(()));
+                Ok(())
+            });
+            Ok(())
+        });
+        let err = vm.drain_microtasks().unwrap_err();
+        assert!(err.contains("microtask checkpoint exceeded configured limit"));
+    }
+
 }
