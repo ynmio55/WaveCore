@@ -499,7 +499,102 @@ impl DomBridge {
             }),
         );
 
-        // 6. URL API constructor
+        // 6. Fetch data-model primitives.
+        vm.set_global(
+            "Headers",
+            JsValue::native("Headers", |_vm, args| {
+                Ok(create_headers_value(headers_from_init(args.first())))
+            }),
+        );
+
+        vm.set_global(
+            "Request",
+            JsValue::native("Request", |_vm, args| {
+                let input = args.first().cloned().unwrap_or(JsValue::String(String::new()));
+                let mut url = match &input {
+                    JsValue::Object(obj) => obj.borrow().get("url").to_js_string(),
+                    other => other.to_js_string(),
+                };
+                let mut method = "GET".to_string();
+                let mut body = JsValue::Null;
+                let mut headers = create_headers_value(HashMap::new());
+
+                if let JsValue::Object(input_obj) = &input {
+                    let existing_method = input_obj.borrow().get("method");
+                    if !matches!(existing_method, JsValue::Undefined) {
+                        method = existing_method.to_js_string();
+                    }
+                    let existing_body = input_obj.borrow().get("body");
+                    if !matches!(existing_body, JsValue::Undefined) {
+                        body = existing_body;
+                    }
+                    let existing_headers = input_obj.borrow().get("headers");
+                    if !matches!(existing_headers, JsValue::Undefined) {
+                        headers = existing_headers;
+                    }
+                }
+
+                if let Some(JsValue::Object(options)) = args.get(1) {
+                    let option_method = options.borrow().get("method");
+                    if !matches!(option_method, JsValue::Undefined) {
+                        method = option_method.to_js_string().to_ascii_uppercase();
+                    }
+                    let option_body = options.borrow().get("body");
+                    if !matches!(option_body, JsValue::Undefined) {
+                        body = option_body;
+                    }
+                    let option_headers = options.borrow().get("headers");
+                    if !matches!(option_headers, JsValue::Undefined) {
+                        headers = create_headers_value(headers_from_init(Some(&option_headers)));
+                    }
+                    let option_url = options.borrow().get("url");
+                    if !matches!(option_url, JsValue::Undefined) {
+                        url = option_url.to_js_string();
+                    }
+                }
+
+                let mut request = JsObject::new();
+                request.set("url", JsValue::String(url));
+                request.set("method", JsValue::String(method.to_ascii_uppercase()));
+                request.set("body", body);
+                request.set("headers", headers);
+                Ok(JsValue::Object(Rc::new(RefCell::new(request))))
+            }),
+        );
+
+        vm.set_global(
+            "Response",
+            JsValue::native("Response", |_vm, args| {
+                let body = args
+                    .first()
+                    .map(|v| v.to_js_string().into_bytes())
+                    .unwrap_or_default();
+                let mut status = 200u16;
+                let mut status_text = String::new();
+                let mut headers = HashMap::new();
+                if let Some(JsValue::Object(options)) = args.get(1) {
+                    let raw_status = options.borrow().get("status").to_number();
+                    if raw_status.is_finite() && (100.0..=599.0).contains(&raw_status) {
+                        status = raw_status as u16;
+                    }
+                    let raw_status_text = options.borrow().get("statusText");
+                    if !matches!(raw_status_text, JsValue::Undefined) {
+                        status_text = raw_status_text.to_js_string();
+                    }
+                    let raw_headers = options.borrow().get("headers");
+                    headers = headers_from_init(Some(&raw_headers));
+                }
+                Ok(create_response_value(
+                    body,
+                    status,
+                    status_text,
+                    String::new(),
+                    headers,
+                ))
+            }),
+        );
+
+        // 7. URL API constructor
         vm.set_global(
             "URL",
             JsValue::native("URL", |_vm, args| {
@@ -523,53 +618,34 @@ impl DomBridge {
         vm.set_global(
             "fetch",
             JsValue::native("fetch", move |_vm, args| {
-                let url = args.first().map(|a| a.to_js_string()).unwrap_or_default();
+                let (url, method) = match args.first() {
+                    Some(JsValue::Object(request)) => (
+                        request.borrow().get("url").to_js_string(),
+                        request.borrow().get("method").to_js_string(),
+                    ),
+                    Some(other) => (other.to_js_string(), "GET".to_string()),
+                    None => (String::new(), "GET".to_string()),
+                };
+                if !method.is_empty() && !method.eq_ignore_ascii_case("GET") {
+                    return Ok(JsValue::Promise(Rc::new(RefCell::new(
+                        JsPromise::rejected(JsValue::String(format!(
+                            "fetch failed: method {method} is not implemented yet"
+                        ))),
+                    ))));
+                }
                 let caller_origin = Origin::parse(&fetch_origin_url.borrow()).ok();
                 match fetch_client
                     .borrow_mut()
                     .fetch_with_origin(&url, caller_origin.as_ref())
                 {
                     Ok(res) => {
-                        let mut resp_obj = JsObject::new();
-                        resp_obj.set("status", JsValue::Number(res.status_code as f64));
-                        resp_obj.set("statusText", JsValue::String(res.status_text.clone()));
-                        resp_obj.set("ok", JsValue::Boolean(res.is_ok()));
-                        resp_obj.set("url", JsValue::String(res.url.clone()));
-                        resp_obj.set("contentType", JsValue::String(res.content_type.clone()));
-
-                        let body_text = res.content.clone();
-                        resp_obj.set(
-                            "text",
-                            JsValue::native("text", move |_vm, _args| {
-                                Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::resolved(JsValue::String(body_text.clone())),
-                                ))))
-                            }),
+                        let response_val = create_response_value(
+                            res.body,
+                            res.status_code,
+                            res.status_text,
+                            res.url,
+                            res.headers,
                         );
-
-                        let body_json = res.content;
-                        resp_obj.set(
-                            "json",
-                            JsValue::native("json", move |vm, _args| {
-                                let json_global = vm
-                                    .get_global("JSON")
-                                    .cloned()
-                                    .ok_or_else(|| "JSON global is unavailable".to_string())?;
-                                let JsValue::Object(json_obj) = json_global else {
-                                    return Err("JSON global is invalid".to_string());
-                                };
-                                let parse = json_obj.borrow().get("parse");
-                                let parsed = vm.call_function(
-                                    &parse,
-                                    &[JsValue::String(body_json.clone())],
-                                )?;
-                                Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::resolved(parsed),
-                                ))))
-                            }),
-                        );
-
-                        let response_val = JsValue::Object(Rc::new(RefCell::new(resp_obj)));
                         Ok(JsValue::Promise(Rc::new(RefCell::new(
                             JsPromise::resolved(response_val),
                         ))))
@@ -704,6 +780,182 @@ impl DomBridge {
 
         default_prevented.get()
     }
+}
+
+fn create_headers_value(initial: HashMap<String, String>) -> JsValue {
+    let entries = Rc::new(RefCell::new(JsObject::new()));
+    for (name, value) in initial {
+        entries
+            .borrow_mut()
+            .set(name.to_ascii_lowercase(), JsValue::String(value));
+    }
+
+    let mut headers = JsObject::new();
+    headers.set("_entries", JsValue::Object(entries.clone()));
+
+    let get_entries = entries.clone();
+    headers.set(
+        "get",
+        JsValue::native("get", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            let value = get_entries.borrow().get(&name);
+            Ok(match value {
+                JsValue::Undefined => JsValue::Null,
+                other => other,
+            })
+        }),
+    );
+
+    let has_entries = entries.clone();
+    headers.set(
+        "has",
+        JsValue::native("has", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            Ok(JsValue::Boolean(
+                has_entries.borrow().properties.contains_key(&name),
+            ))
+        }),
+    );
+
+    let set_entries = entries.clone();
+    headers.set(
+        "set",
+        JsValue::native("set", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            let value = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+            if !name.is_empty() {
+                set_entries.borrow_mut().set(name, JsValue::String(value));
+            }
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let append_entries = entries.clone();
+    headers.set(
+        "append",
+        JsValue::native("append", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            let value = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+            if !name.is_empty() {
+                let previous = append_entries.borrow().get(&name);
+                let combined = match previous {
+                    JsValue::String(existing) if !existing.is_empty() => {
+                        format!("{existing}, {value}")
+                    }
+                    _ => value,
+                };
+                append_entries
+                    .borrow_mut()
+                    .set(name, JsValue::String(combined));
+            }
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let delete_entries = entries.clone();
+    headers.set(
+        "delete",
+        JsValue::native("delete", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            delete_entries.borrow_mut().properties.remove(&name);
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    JsValue::Object(Rc::new(RefCell::new(headers)))
+}
+
+fn headers_from_init(value: Option<&JsValue>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(JsValue::Object(obj)) = value {
+        let entries = obj.borrow().get("_entries");
+        if let JsValue::Object(entries) = entries {
+            for (name, value) in &entries.borrow().properties {
+                out.insert(name.to_ascii_lowercase(), value.to_js_string());
+            }
+        } else {
+            for (name, value) in &obj.borrow().properties {
+                if !name.starts_with('_') {
+                    out.insert(name.to_ascii_lowercase(), value.to_js_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn create_response_value(
+    body: Vec<u8>,
+    status: u16,
+    status_text: String,
+    url: String,
+    headers: HashMap<String, String>,
+) -> JsValue {
+    let text = String::from_utf8_lossy(&body).to_string();
+    let mut response = JsObject::new();
+    response.set("status", JsValue::Number(status as f64));
+    response.set("statusText", JsValue::String(status_text));
+    response.set("ok", JsValue::Boolean((200..=299).contains(&status)));
+    response.set("url", JsValue::String(url));
+    response.set("headers", create_headers_value(headers));
+
+    let text_body = text.clone();
+    response.set(
+        "text",
+        JsValue::native("text", move |_vm, _args| {
+            Ok(JsValue::Promise(Rc::new(RefCell::new(
+                JsPromise::resolved(JsValue::String(text_body.clone())),
+            ))))
+        }),
+    );
+
+    let json_body = text;
+    response.set(
+        "json",
+        JsValue::native("json", move |vm, _args| {
+            let json_global = vm
+                .get_global("JSON")
+                .cloned()
+                .ok_or_else(|| "JSON global is unavailable".to_string())?;
+            let JsValue::Object(json_obj) = json_global else {
+                return Err("JSON global is invalid".to_string());
+            };
+            let parse = json_obj.borrow().get("parse");
+            let parsed = vm.call_function(&parse, &[JsValue::String(json_body.clone())])?;
+            Ok(JsValue::Promise(Rc::new(RefCell::new(
+                JsPromise::resolved(parsed),
+            ))))
+        }),
+    );
+
+    let bytes = body;
+    response.set(
+        "arrayBuffer",
+        JsValue::native("arrayBuffer", move |_vm, _args| {
+            Ok(JsValue::Promise(Rc::new(RefCell::new(
+                JsPromise::resolved(JsValue::ArrayBuffer(Rc::new(RefCell::new(
+                    bytes.clone(),
+                )))),
+            ))))
+        }),
+    );
+
+    JsValue::Object(Rc::new(RefCell::new(response)))
 }
 
 fn parse_url_parts(url: &str) -> (String, String, String, String, String) {
