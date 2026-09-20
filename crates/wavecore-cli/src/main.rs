@@ -115,12 +115,14 @@ fn layout_and_render(
     dom: &Node,
     css: &str,
     width: f32,
+    canvas_commands: &std::collections::HashMap<u64, Vec<wavecore_render::Canvas2DCommand>>,
 ) -> (LayoutBox, Vec<DisplayCommand>) {
     let sheet = wavecore_css::parse(css);
     let styled = wavecore_style::style_tree(dom, &sheet);
     let layout = wavecore_layout::layout(&styled, width);
     let compositor_frame = wavecore_render::build_compositor_frame(&layout);
-    let display_list = compositor_frame.flatten();
+    let mut display_list = compositor_frame.flatten();
+    wavecore_render::append_canvas_commands(&layout, canvas_commands, &mut display_list);
     (layout, display_list)
 }
 
@@ -211,7 +213,9 @@ fn main() {
             }
         };
 
-        let (mut layout, mut display_list) = layout_and_render(&state.dom.borrow(), &full_css, width as f32);
+        let initial_canvas = state.bridge.canvas_commands_snapshot();
+        let (mut layout, mut display_list) =
+            layout_and_render(&state.dom.borrow(), &full_css, width as f32, &initial_canvas);
         let mut surface = Surface::new(width as u32, height as u32);
         surface.clear(Rgba(13, 17, 23, 255));
         surface.paint(&display_list);
@@ -491,7 +495,9 @@ fn main() {
             let scroll_y = win.scroll_y;
 
             if needs_re_render {
-                let (nl, nd) = layout_and_render(&state.dom.borrow(), &full_css, width as f32);
+                let canvas_commands = state.bridge.canvas_commands_snapshot();
+                let (nl, nd) =
+                    layout_and_render(&state.dom.borrow(), &full_css, width as f32, &canvas_commands);
                 layout = nl;
                 display_list = nd;
                 needs_repaint = true;
@@ -547,7 +553,9 @@ fn main() {
             }
         };
 
-        let (layout, display_list) = layout_and_render(&state.dom.borrow(), &full_css, 800.0);
+        let canvas_commands = state.bridge.canvas_commands_snapshot();
+        let (layout, display_list) =
+            layout_and_render(&state.dom.borrow(), &full_css, 800.0, &canvas_commands);
 
         let render_height = (layout.rect.height as u32 + 100).max(600).min(4000);
         let mut surface = Surface::new(800, render_height);
