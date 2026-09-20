@@ -800,6 +800,13 @@ impl VM {
                     let callee = self.stack.pop().unwrap_or(JsValue::Undefined);
                     match callee {
                         JsValue::Function(f) => {
+                            if self.frames.len() >= self.max_call_depth {
+                                return Err(format!(
+                                    "RangeError: maximum call stack size exceeded (limit {})",
+                                    self.max_call_depth
+                                ));
+                            }
+
                             let env = match &f.closure_env {
                                 Some(parent) => {
                                     Rc::new(RefCell::new(Environment::with_parent(parent.clone())))

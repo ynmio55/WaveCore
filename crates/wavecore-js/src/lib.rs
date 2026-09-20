@@ -398,7 +398,7 @@ mod tests {
         bridge.attach_to_vm(&mut vm);
 
         eval_script(
-            r#"
+            r##"
                 let canvas = document.getElementById("paint");
                 let ctx = canvas.getContext("2d");
                 ctx.setStrokeStyle("#ff0000");
@@ -410,7 +410,7 @@ mod tests {
                 ctx.stroke();
                 ctx.setFillStyle("#00ff00");
                 ctx.fill();
-            "#,
+            "##,
             &mut vm,
         )
         .unwrap();
