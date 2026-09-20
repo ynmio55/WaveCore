@@ -275,4 +275,33 @@ mod tests {
         assert_eq!(result, JsValue::Number(8.0));
     }
 
+    #[test]
+    fn set_interval_repeats_and_can_be_cleared() {
+        let root = Rc::new(RefCell::new(Node::document(vec![])));
+        let bridge = DomBridge::new(root);
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        eval_script(
+            r#"
+                let ticks = 0;
+                let intervalId = setInterval(function() {
+                    ticks = ticks + 1;
+                }, 1);
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_eq!(bridge.dispatch_due_timers(&mut vm), 1);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_eq!(bridge.dispatch_due_timers(&mut vm), 1);
+        assert_eq!(eval_script("ticks;", &mut vm).unwrap(), JsValue::Number(2.0));
+
+        eval_script("clearInterval(intervalId);", &mut vm).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_eq!(bridge.dispatch_due_timers(&mut vm), 0);
+    }
+
 }
