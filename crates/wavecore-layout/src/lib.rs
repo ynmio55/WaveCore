@@ -316,7 +316,7 @@ fn layout_at(
 ) -> LayoutBox {
     if is_hidden(node) {
         return LayoutBox {
-            node_id: Some(node.node_id()),
+            node_id: Some(node.node.node_id()),
             rect: Rect::default(),
             content: Rect::default(),
             padding: Edges::default(),
@@ -379,7 +379,7 @@ fn layout_at(
         );
         let h = metrics.height;
         return LayoutBox {
-            node_id: Some(node.node_id()),
+            node_id: Some(node.node.node_id()),
             rect: Rect { x, y, width: available, height: h },
             content: Rect { x, y, width: available, height: h },
             padding: Edges::default(),
@@ -734,7 +734,7 @@ fn layout_at(
         });
 
     LayoutBox {
-        node_id: Some(node.node_id()),
+        node_id: Some(node.node.node_id()),
         rect,
         content,
         padding,
