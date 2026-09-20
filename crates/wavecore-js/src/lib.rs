@@ -169,7 +169,11 @@ mod tests {
                 let gl = canvas.getContext("webgl");
                 let buffer = gl.createBuffer();
                 gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-                gl.bufferData(gl.ARRAY_BUFFER, [-1, -1, 1, -1, 0, 1], gl.STATIC_DRAW);
+                gl.bufferData(
+                    gl.ARRAY_BUFFER,
+                    new Float32Array([-1, -1, 1, -1, 0, 1]),
+                    gl.STATIC_DRAW
+                );
                 gl.enableVertexAttribArray(0);
                 gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
                 gl.clearColor(0.1, 0.2, 0.3, 1.0);
@@ -177,7 +181,11 @@ mod tests {
                 gl.drawArrays(gl.TRIANGLES, 0, 3);
                 let ibo = gl.createBuffer();
                 gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, [0, 1, 2], gl.STATIC_DRAW);
+                gl.bufferData(
+                    gl.ELEMENT_ARRAY_BUFFER,
+                    new Uint16Array([0, 1, 2]),
+                    gl.STATIC_DRAW
+                );
                 gl.drawElements(gl.TRIANGLES, 3, gl.UNSIGNED_SHORT, 0);
             "#,
             &mut vm,
@@ -205,6 +213,21 @@ mod tests {
             wavecore_render::WebGlCommand::DrawElements { mode, count, .. }
                 if *mode == 4 && *count == 3
         )));
+    }
+
+    #[test]
+    fn typed_arrays_coerce_values_and_support_indexing() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let a = new Uint8Array([257, -1, 3]);
+                let b = new Float32Array([1.25, 2.5]);
+                a[0] + a[1] + a.length + b[0];
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::Number(514.25));
     }
 
 }
