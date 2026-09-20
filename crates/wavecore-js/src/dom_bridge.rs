@@ -40,6 +40,16 @@ struct CanvasPathState {
     first: Option<(f32, f32)>,
 }
 
+#[derive(Clone)]
+struct MutationObserverRegistration {
+    callback: JsValue,
+    target_id: Option<String>,
+    subtree: bool,
+    attributes: bool,
+    child_list: bool,
+    character_data: bool,
+}
+
 pub struct DomBridge {
     pub root: Rc<RefCell<Node>>,
     pub listeners: Rc<RefCell<HashMap<(String, String), Vec<JsValue>>>>,
@@ -50,6 +60,7 @@ pub struct DomBridge {
     network_client: Rc<RefCell<NetworkClient>>,
     canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
     webgl_commands: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
+    mutation_observers: Rc<RefCell<HashMap<usize, MutationObserverRegistration>>>,
 }
 
 impl DomBridge {
@@ -64,6 +75,7 @@ impl DomBridge {
             network_client: Rc::new(RefCell::new(NetworkClient::new())),
             canvas_commands: Rc::new(RefCell::new(HashMap::new())),
             webgl_commands: Rc::new(RefCell::new(HashMap::new())),
+            mutation_observers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -86,6 +98,7 @@ impl DomBridge {
             network_client,
             canvas_commands: Rc::new(RefCell::new(HashMap::new())),
             webgl_commands: Rc::new(RefCell::new(HashMap::new())),
+            mutation_observers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -100,6 +113,7 @@ impl DomBridge {
     pub fn attach_to_vm(&self, vm: &mut VM) {
         let canvas_commands_ref = self.canvas_commands.clone();
         let webgl_commands_ref = self.webgl_commands.clone();
+        let mutation_observers_ref = self.mutation_observers.clone();
         let root_ref = self.root.clone();
         let listeners_ref = self.listeners.clone();
         let url_ref = self.current_url.clone();
@@ -119,7 +133,7 @@ impl DomBridge {
                 let id = args.first().map(|a| a.to_js_string()).unwrap_or_default();
                 let borrowed = r1.borrow();
                 if let Some(_node) = borrowed.find_by_id(&id) {
-                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone(), c1.clone(), w1.clone());
+                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone(), c1.clone(), w1.clone(), mutation_observers_ref.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -149,7 +163,7 @@ impl DomBridge {
                     } else {
                         "".to_string()
                     };
-                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone(), c2.clone(), w2.clone());
+                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone(), c2.clone(), w2.clone(), mutation_observers_ref.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -195,6 +209,7 @@ impl DomBridge {
                         l_all.clone(),
                         c_all.clone(),
                         w_all.clone(),
+                        mutation_observers_ref.clone(),
                     ));
                 }
 
@@ -219,7 +234,7 @@ impl DomBridge {
                 // Store in root children temporarily as detached node
                 r_create.borrow_mut().append_child(new_node);
 
-                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone(), c_create.clone(), w_create.clone());
+                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone(), c_create.clone(), w_create.clone(), mutation_observers_ref.clone());
                 Ok(elem)
             }),
         );
@@ -1070,6 +1085,7 @@ fn create_element_wrapper(
     listeners: Rc<RefCell<HashMap<(String, String), Vec<JsValue>>>>,
     canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
     webgl_commands: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
+    mutation_observers: Rc<RefCell<HashMap<usize, MutationObserverRegistration>>>,
 ) -> JsValue {
     let mut elem_obj = JsObject::new();
     let elem_id = id.to_string();
