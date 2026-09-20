@@ -934,6 +934,15 @@ impl VM {
                                 .unwrap_or(JsValue::Undefined);
                             self.stack.push(val);
                         }
+                        JsValue::TypedArray(arr) => {
+                            let idx = index_val.to_number() as usize;
+                            let val = arr
+                                .borrow()
+                                .get(idx)
+                                .map(JsValue::Number)
+                                .unwrap_or(JsValue::Undefined);
+                            self.stack.push(val);
+                        }
                         JsValue::Object(obj) => {
                             let key = index_val.to_js_string();
                             self.stack.push(obj.borrow().get(&key));
@@ -963,6 +972,10 @@ impl VM {
                             }
                             borrowed[idx] = val;
                         }
+                        JsValue::TypedArray(arr) => {
+                            let idx = index_val.to_number() as usize;
+                            arr.borrow_mut().set(idx, val.to_number());
+                        }
                         JsValue::Object(obj) => {
                             let key = index_val.to_js_string();
                             obj.borrow_mut().set(key, val);
@@ -973,6 +986,79 @@ impl VM {
                 OpCode::GetProp(prop) => {
                     let obj_val = self.stack.pop().unwrap_or(JsValue::Undefined);
                     match obj_val {
+                        JsValue::ArrayBuffer(buffer) => {
+                            match prop.as_str() {
+                                "byteLength" => {
+                                    self.stack.push(JsValue::Number(buffer.borrow().len() as f64));
+                                }
+                                "slice" => {
+                                    let source = buffer.clone();
+                                    self.stack.push(JsValue::native("slice", move |_vm, args| {
+                                        let bytes = source.borrow();
+                                        let len = bytes.len() as isize;
+                                        let normalize = |value: Option<&JsValue>, default: isize| {
+                                            let raw = value.map(|v| v.to_number() as isize).unwrap_or(default);
+                                            if raw < 0 { (len + raw).max(0) } else { raw.min(len) }
+                                        };
+                                        let start = normalize(args.get(0), 0) as usize;
+                                        let end = normalize(args.get(1), len).max(start as isize) as usize;
+                                        Ok(JsValue::ArrayBuffer(Rc::new(RefCell::new(
+                                            bytes[start..end.min(bytes.len())].to_vec(),
+                                        ))))
+                                    }));
+                                }
+                                _ => self.stack.push(JsValue::Undefined),
+                            }
+                        }
+                        JsValue::TypedArray(array) => {
+                            match prop.as_str() {
+                                "length" => self.stack.push(JsValue::Number(array.borrow().length as f64)),
+                                "byteLength" => self.stack.push(JsValue::Number(array.borrow().byte_length() as f64)),
+                                "byteOffset" => self.stack.push(JsValue::Number(array.borrow().byte_offset as f64)),
+                                "buffer" => {
+                                    self.stack.push(JsValue::ArrayBuffer(array.borrow().buffer.clone()));
+                                }
+                                "set" => {
+                                    let target = array.clone();
+                                    self.stack.push(JsValue::native("set", move |_vm, args| {
+                                        let offset = args.get(1).map(|v| v.to_number().max(0.0) as usize).unwrap_or(0);
+                                        let values = match args.first() {
+                                            Some(JsValue::TypedArray(src)) => src.borrow().values(),
+                                            Some(JsValue::Array(src)) => src.borrow().clone(),
+                                            _ => Vec::new(),
+                                        };
+                                        let mut target = target.borrow_mut();
+                                        for (i, value) in values.iter().enumerate() {
+                                            if offset + i >= target.length { break; }
+                                            target.set(offset + i, value.to_number());
+                                        }
+                                        Ok(JsValue::Undefined)
+                                    }));
+                                }
+                                "subarray" => {
+                                    let source = array.clone();
+                                    self.stack.push(JsValue::native("subarray", move |_vm, args| {
+                                        let source = source.borrow();
+                                        let len = source.length as isize;
+                                        let normalize = |value: Option<&JsValue>, default: isize| {
+                                            let raw = value.map(|v| v.to_number() as isize).unwrap_or(default);
+                                            if raw < 0 { (len + raw).max(0) } else { raw.min(len) }
+                                        };
+                                        let begin = normalize(args.get(0), 0) as usize;
+                                        let end = normalize(args.get(1), len).max(begin as isize) as usize;
+                                        let bpe = source.kind.bytes_per_element();
+                                        let view = TypedArrayValue::from_buffer(
+                                            source.buffer.clone(),
+                                            source.kind,
+                                            source.byte_offset + begin * bpe,
+                                            Some(end.min(source.length).saturating_sub(begin)),
+                                        )?;
+                                        Ok(JsValue::TypedArray(Rc::new(RefCell::new(view))))
+                                    }));
+                                }
+                                _ => self.stack.push(JsValue::Undefined),
+                            }
+                        }
                         JsValue::Object(obj) => {
                             let val = obj.borrow().get(&prop);
                             self.stack.push(val);
