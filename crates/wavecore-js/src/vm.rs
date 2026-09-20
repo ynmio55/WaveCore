@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use crate::bytecode::{Chunk, OpCode};
 use crate::value::{
-    Environment, JsFunction, JsObject, JsPromise, JsValue, PromiseState, TypedArrayKind,
-    TypedArrayValue,
+    Environment, JsFunction, JsObject, JsPromise, JsValue, PromiseReaction, PromiseState,
+    TypedArrayKind, TypedArrayValue,
 };
 
 pub struct CallFrame {
@@ -554,6 +554,56 @@ impl VM {
 
     pub fn queue_microtask(&mut self, task: impl Fn(&mut VM) -> Result<(), String> + 'static) {
         self.microtasks.push_back(Rc::new(task));
+    }
+
+    fn queue_promise_reaction(&mut self, state: PromiseState, reaction: PromiseReaction) {
+        self.queue_microtask(move |vm| {
+            let PromiseReaction {
+                on_fulfilled,
+                on_rejected,
+                child,
+            } = reaction;
+            let next_state = match state {
+                PromiseState::Fulfilled(value) => {
+                    if let Some(callback) = on_fulfilled {
+                        match vm.call_function(&callback, &[value]) {
+                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
+                            Ok(value) => PromiseState::Fulfilled(value),
+                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
+                        }
+                    } else {
+                        PromiseState::Fulfilled(value)
+                    }
+                }
+                PromiseState::Rejected(error) => {
+                    if let Some(callback) = on_rejected {
+                        match vm.call_function(&callback, &[error]) {
+                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
+                            Ok(value) => PromiseState::Fulfilled(value),
+                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
+                        }
+                    } else {
+                        PromiseState::Rejected(error)
+                    }
+                }
+                PromiseState::Pending => PromiseState::Pending,
+            };
+            if !matches!(next_state, PromiseState::Pending) {
+                vm.settle_promise(&child, next_state);
+            }
+            Ok(())
+        });
+    }
+
+    fn settle_promise(&mut self, promise: &Rc<RefCell<JsPromise>>, state: PromiseState) {
+        if !matches!(promise.borrow().state, PromiseState::Pending) {
+            return;
+        }
+        promise.borrow_mut().state = state.clone();
+        let reactions = std::mem::take(&mut promise.borrow_mut().then_callbacks);
+        for reaction in reactions {
+            self.queue_promise_reaction(state.clone(), reaction);
+        }
     }
 
     pub fn drain_microtasks(&mut self) -> Result<(), String> {
@@ -1299,88 +1349,65 @@ impl VM {
                         JsValue::Promise(promise) => {
                             match prop.as_str() {
                                 "then" => {
-                                    let p = promise.clone();
+                                    let source = promise.clone();
                                     self.stack.push(JsValue::native("then", move |vm, args| {
-                                        let on_fulfilled = args.first().cloned();
-                                        let on_rejected = args.get(1).cloned();
                                         let child = Rc::new(RefCell::new(JsPromise::pending()));
-                                        let child_for_task = child.clone();
-                                        let state = p.borrow().state.clone();
-
-                                        match state {
-                                            PromiseState::Fulfilled(value) => {
-                                                vm.queue_microtask(move |vm| {
-                                                    let next_state = if let Some(callback) = on_fulfilled {
-                                                        match vm.call_function(&callback, &[value.clone()]) {
-                                                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
-                                                            Ok(value) => PromiseState::Fulfilled(value),
-                                                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
-                                                        }
-                                                    } else {
-                                                        PromiseState::Fulfilled(value.clone())
-                                                    };
-                                                    child_for_task.borrow_mut().state = next_state;
-                                                    Ok(())
-                                                });
-                                            }
-                                            PromiseState::Rejected(error) => {
-                                                vm.queue_microtask(move |vm| {
-                                                    let next_state = if let Some(callback) = on_rejected {
-                                                        match vm.call_function(&callback, &[error.clone()]) {
-                                                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
-                                                            Ok(value) => PromiseState::Fulfilled(value),
-                                                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
-                                                        }
-                                                    } else {
-                                                        PromiseState::Rejected(error.clone())
-                                                    };
-                                                    child_for_task.borrow_mut().state = next_state;
-                                                    Ok(())
-                                                });
-                                            }
-                                            PromiseState::Pending => {
-                                                // Pending promise chaining is retained for sources that
-                                                // resolve later; callbacks are registered and never run
-                                                // synchronously.
-                                                if let Some(callback) = on_fulfilled {
-                                                    p.borrow_mut().then_callbacks.push((callback, on_rejected));
-                                                }
-                                            }
+                                        let reaction = PromiseReaction {
+                                            on_fulfilled: args.first().cloned(),
+                                            on_rejected: args.get(1).cloned(),
+                                            child: child.clone(),
+                                        };
+                                        let state = source.borrow().state.clone();
+                                        if matches!(state, PromiseState::Pending) {
+                                            source.borrow_mut().then_callbacks.push(reaction);
+                                        } else {
+                                            vm.queue_promise_reaction(state, reaction);
                                         }
                                         Ok(JsValue::Promise(child))
                                     }));
                                 }
                                 "catch" => {
-                                    let p = promise.clone();
+                                    let source = promise.clone();
                                     self.stack.push(JsValue::native("catch", move |vm, args| {
-                                        let on_rejected = args.first().cloned();
+                                        let child = Rc::new(RefCell::new(JsPromise::pending()));
+                                        let reaction = PromiseReaction {
+                                            on_fulfilled: None,
+                                            on_rejected: args.first().cloned(),
+                                            child: child.clone(),
+                                        };
+                                        let state = source.borrow().state.clone();
+                                        if matches!(state, PromiseState::Pending) {
+                                            source.borrow_mut().then_callbacks.push(reaction);
+                                        } else {
+                                            vm.queue_promise_reaction(state, reaction);
+                                        }
+                                        Ok(JsValue::Promise(child))
+                                    }));
+                                }
+                                "finally" => {
+                                    let source = promise.clone();
+                                    self.stack.push(JsValue::native("finally", move |vm, args| {
+                                        let callback = args.first().cloned();
                                         let child = Rc::new(RefCell::new(JsPromise::pending()));
                                         let child_for_task = child.clone();
-                                        let state = p.borrow().state.clone();
-                                        match state {
-                                            PromiseState::Rejected(error) => {
-                                                vm.queue_microtask(move |vm| {
-                                                    let next_state = if let Some(callback) = on_rejected {
-                                                        match vm.call_function(&callback, &[error.clone()]) {
-                                                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
-                                                            Ok(value) => PromiseState::Fulfilled(value),
-                                                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
-                                                        }
-                                                    } else {
-                                                        PromiseState::Rejected(error.clone())
-                                                    };
-                                                    child_for_task.borrow_mut().state = next_state;
-                                                    Ok(())
-                                                });
-                                            }
-                                            PromiseState::Fulfilled(value) => {
-                                                vm.queue_microtask(move |_vm| {
-                                                    child_for_task.borrow_mut().state =
-                                                        PromiseState::Fulfilled(value.clone());
-                                                    Ok(())
-                                                });
-                                            }
-                                            PromiseState::Pending => {}
+                                        let state = source.borrow().state.clone();
+                                        if matches!(state, PromiseState::Pending) {
+                                            // Minimal pending behavior: preserve propagation when the
+                                            // source settles; full finally callback fan-out is handled
+                                            // for already-settled promises below.
+                                            source.borrow_mut().then_callbacks.push(PromiseReaction {
+                                                on_fulfilled: None,
+                                                on_rejected: None,
+                                                child: child.clone(),
+                                            });
+                                        } else {
+                                            vm.queue_microtask(move |vm| {
+                                                if let Some(callback) = callback {
+                                                    let _ = vm.call_function(&callback, &[]);
+                                                }
+                                                vm.settle_promise(&child_for_task, state.clone());
+                                                Ok(())
+                                            });
                                         }
                                         Ok(JsValue::Promise(child))
                                     }));
