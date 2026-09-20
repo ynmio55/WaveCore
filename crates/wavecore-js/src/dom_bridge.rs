@@ -411,7 +411,106 @@ impl DomBridge {
 
         vm.set_global("window", JsValue::Object(Rc::new(RefCell::new(window))));
 
-        // 5. Event / CustomEvent constructors.
+        // 5. MutationObserver with microtask-delivered mutation records.
+        let observer_registry = mutation_observers_ref.clone();
+        vm.set_global(
+            "MutationObserver",
+            JsValue::native("MutationObserver", move |_vm, args| {
+                let callback = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "TypeError: MutationObserver requires a callback".to_string())?;
+                if !matches!(callback, JsValue::Function(_) | JsValue::NativeFunction(_, _)) {
+                    return Err("TypeError: MutationObserver callback must be callable".to_string());
+                }
+
+                let observer_id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                observer_registry.borrow_mut().insert(
+                    observer_id,
+                    MutationObserverRegistration {
+                        callback,
+                        target_id: None,
+                        subtree: false,
+                        attributes: false,
+                        child_list: false,
+                        character_data: false,
+                    },
+                );
+
+                let mut observer = JsObject::new();
+                observer.set("_observerId", JsValue::Number(observer_id as f64));
+
+                let observe_registry = observer_registry.clone();
+                observer.set(
+                    "observe",
+                    JsValue::native("observe", move |_vm, args| {
+                        let target_id = match args.first() {
+                            Some(JsValue::Object(target)) => target.borrow().get("id").to_js_string(),
+                            _ => String::new(),
+                        };
+                        if target_id.is_empty() {
+                            return Err("TypeError: MutationObserver.observe requires an Element target".to_string());
+                        }
+                        let options = args.get(1).and_then(|value| match value {
+                            JsValue::Object(options) => Some(options.clone()),
+                            _ => None,
+                        });
+                        let subtree = options
+                            .as_ref()
+                            .map(|o| o.borrow().get("subtree").is_truthy())
+                            .unwrap_or(false);
+                        let attributes = options
+                            .as_ref()
+                            .map(|o| o.borrow().get("attributes").is_truthy())
+                            .unwrap_or(false);
+                        let child_list = options
+                            .as_ref()
+                            .map(|o| o.borrow().get("childList").is_truthy())
+                            .unwrap_or(false);
+                        let character_data = options
+                            .as_ref()
+                            .map(|o| o.borrow().get("characterData").is_truthy())
+                            .unwrap_or(false);
+                        if !attributes && !child_list && !character_data {
+                            return Err(
+                                "TypeError: MutationObserver options must enable at least one mutation type"
+                                    .to_string(),
+                            );
+                        }
+                        if let Some(registration) = observe_registry.borrow_mut().get_mut(&observer_id) {
+                            registration.target_id = Some(target_id);
+                            registration.subtree = subtree;
+                            registration.attributes = attributes;
+                            registration.child_list = child_list;
+                            registration.character_data = character_data;
+                        }
+                        Ok(JsValue::Undefined)
+                    }),
+                );
+
+                let disconnect_registry = observer_registry.clone();
+                observer.set(
+                    "disconnect",
+                    JsValue::native("disconnect", move |_vm, _args| {
+                        if let Some(registration) = disconnect_registry.borrow_mut().get_mut(&observer_id) {
+                            registration.target_id = None;
+                        }
+                        Ok(JsValue::Undefined)
+                    }),
+                );
+
+                observer.set(
+                    "takeRecords",
+                    JsValue::native("takeRecords", |_vm, _args| {
+                        Ok(JsValue::new_array(Vec::new()))
+                    }),
+                );
+
+                Ok(JsValue::Object(Rc::new(RefCell::new(observer))))
+            }),
+        );
+
+        // 6. Event / CustomEvent constructors.
         let make_event = |args: &[JsValue], custom: bool| -> Result<JsValue, String> {
             let event_type = args.first().map(|v| v.to_js_string()).unwrap_or_default();
             let options = args.get(1).and_then(|value| match value {
@@ -1073,6 +1172,76 @@ fn create_history_object(history_stack: Rc<RefCell<Vec<String>>>) -> JsObject {
     );
 
     hist
+}
+
+fn queue_mutation_observers(
+    vm: &mut VM,
+    root: &Rc<RefCell<Node>>,
+    observers: &Rc<RefCell<HashMap<usize, MutationObserverRegistration>>>,
+    target_id: &str,
+    mutation_type: &str,
+    attribute_name: Option<&str>,
+) {
+    let registrations = observers
+        .borrow()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let ancestor_ids = {
+        let root = root.borrow();
+        root.find_by_id(target_id)
+            .and_then(|target| root.ancestor_ids_for(target.node_id()))
+            .unwrap_or_default()
+    };
+
+    for registration in registrations {
+        let Some(observed_id) = registration.target_id.clone() else {
+            continue;
+        };
+
+        let type_enabled = match mutation_type {
+            "attributes" => registration.attributes,
+            "childList" => registration.child_list,
+            "characterData" => registration.character_data,
+            _ => false,
+        };
+        if !type_enabled {
+            continue;
+        }
+
+        let matches_target = if observed_id == target_id {
+            true
+        } else if registration.subtree {
+            let root = root.borrow();
+            root.find_by_id(&observed_id)
+                .map(|node| ancestor_ids.contains(&node.node_id()))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !matches_target {
+            continue;
+        }
+
+        let callback = registration.callback.clone();
+        let target = target_id.to_string();
+        let kind = mutation_type.to_string();
+        let attribute = attribute_name.map(str::to_string);
+        vm.queue_microtask(move |vm| {
+            let mut record = JsObject::new();
+            record.set("type", JsValue::String(kind.clone()));
+            record.set("targetId", JsValue::String(target.clone()));
+            if let Some(attribute) = &attribute {
+                record.set("attributeName", JsValue::String(attribute.clone()));
+            } else {
+                record.set("attributeName", JsValue::Null);
+            }
+            let records = JsValue::new_array(vec![JsValue::Object(Rc::new(RefCell::new(record)))]);
+            let _ = vm.call_function(&callback, &[records, JsValue::Undefined])?;
+            Ok(())
+        });
+    }
 }
 
 fn same_js_callback(a: &JsValue, b: &JsValue) -> bool {
