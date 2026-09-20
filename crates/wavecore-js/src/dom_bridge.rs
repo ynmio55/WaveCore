@@ -392,7 +392,114 @@ impl DomBridge {
 
         vm.set_global("window", JsValue::Object(Rc::new(RefCell::new(window))));
 
-        // 5. URL API constructor
+        // 5. Event / CustomEvent constructors.
+        let make_event = |args: &[JsValue], custom: bool| -> Result<JsValue, String> {
+            let event_type = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+            let options = args.get(1).and_then(|value| match value {
+                JsValue::Object(obj) => Some(obj.clone()),
+                _ => None,
+            });
+            let bubbles = options
+                .as_ref()
+                .map(|obj| obj.borrow().get("bubbles").is_truthy())
+                .unwrap_or(false);
+            let cancelable = options
+                .as_ref()
+                .map(|obj| obj.borrow().get("cancelable").is_truthy())
+                .unwrap_or(false);
+            let detail = if custom {
+                options
+                    .as_ref()
+                    .map(|obj| obj.borrow().get("detail"))
+                    .unwrap_or(JsValue::Null)
+            } else {
+                JsValue::Undefined
+            };
+
+            let prevented = Rc::new(Cell::new(false));
+            let mut event = JsObject::new();
+            event.set("type", JsValue::String(event_type));
+            event.set("bubbles", JsValue::Boolean(bubbles));
+            event.set("cancelable", JsValue::Boolean(cancelable));
+            event.set("defaultPrevented", JsValue::Boolean(false));
+            if custom {
+                event.set("detail", detail);
+            }
+            let prevented_for_default = prevented.clone();
+            event.set(
+                "preventDefault",
+                JsValue::native("preventDefault", move |_vm, _args| {
+                    if cancelable {
+                        prevented_for_default.set(true);
+                    }
+                    Ok(JsValue::Undefined)
+                }),
+            );
+            let prevented_for_query = prevented.clone();
+            event.set(
+                "_isDefaultPrevented",
+                JsValue::native("_isDefaultPrevented", move |_vm, _args| {
+                    Ok(JsValue::Boolean(prevented_for_query.get()))
+                }),
+            );
+            Ok(JsValue::Object(Rc::new(RefCell::new(event))))
+        };
+
+        vm.set_global(
+            "Event",
+            JsValue::native("Event", move |_vm, args| make_event(args, false)),
+        );
+
+        vm.set_global(
+            "CustomEvent",
+            JsValue::native("CustomEvent", move |_vm, args| {
+                let event_type = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                let options = args.get(1).and_then(|value| match value {
+                    JsValue::Object(obj) => Some(obj.clone()),
+                    _ => None,
+                });
+                let bubbles = options
+                    .as_ref()
+                    .map(|obj| obj.borrow().get("bubbles").is_truthy())
+                    .unwrap_or(false);
+                let cancelable = options
+                    .as_ref()
+                    .map(|obj| obj.borrow().get("cancelable").is_truthy())
+                    .unwrap_or(false);
+                let detail = options
+                    .as_ref()
+                    .map(|obj| obj.borrow().get("detail"))
+                    .unwrap_or(JsValue::Null);
+
+                let prevented = Rc::new(Cell::new(false));
+                let mut event = JsObject::new();
+                event.set("type", JsValue::String(event_type));
+                event.set("bubbles", JsValue::Boolean(bubbles));
+                event.set("cancelable", JsValue::Boolean(cancelable));
+                event.set("defaultPrevented", JsValue::Boolean(false));
+                event.set("detail", detail);
+                let prevented_for_default = prevented.clone();
+                event.set(
+                    "preventDefault",
+                    JsValue::native("preventDefault", move |_vm, _args| {
+                        if cancelable {
+                            prevented_for_default.set(true);
+                        }
+                        Ok(JsValue::Undefined)
+                    }),
+                );
+                let prevented_for_query = prevented.clone();
+                event.set(
+                    "_isDefaultPrevented",
+                    JsValue::native("_isDefaultPrevented", move |_vm, _args| {
+                        Ok(JsValue::Boolean(prevented_for_query.get()))
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(event))))
+            }),
+        );
+
+        // 6. URL API constructor
         vm.set_global(
             "URL",
             JsValue::native("URL", |_vm, args| {
@@ -697,6 +804,14 @@ fn create_history_object(history_stack: Rc<RefCell<Vec<String>>>) -> JsObject {
     hist
 }
 
+fn same_js_callback(a: &JsValue, b: &JsValue) -> bool {
+    match (a, b) {
+        (JsValue::Function(a), JsValue::Function(b)) => Rc::ptr_eq(a, b),
+        (JsValue::NativeFunction(_, a), JsValue::NativeFunction(_, b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
 fn create_element_wrapper(
     id: &str,
     root: Rc<RefCell<Node>>,
@@ -921,9 +1036,9 @@ fn create_element_wrapper(
         }),
     );
 
-    // addEventListener
-    let l_add = listeners;
-    let id_evt = elem_id;
+    // EventTarget-compatible listener registration/removal and dispatch.
+    let l_add = listeners.clone();
+    let id_evt = elem_id.clone();
     elem_obj.set(
         "addEventListener",
         JsValue::native("addEventListener", move |_vm, args| {
@@ -933,6 +1048,83 @@ fn create_element_wrapper(
                 map.entry((id_evt.clone(), evt)).or_default().push(cb.clone());
             }
             Ok(JsValue::Undefined)
+        }),
+    );
+
+    let l_remove = listeners.clone();
+    let id_remove_evt = elem_id.clone();
+    elem_obj.set(
+        "removeEventListener",
+        JsValue::native("removeEventListener", move |_vm, args| {
+            let evt = args.first().map(|a| a.to_js_string()).unwrap_or_default();
+            let Some(callback) = args.get(1) else {
+                return Ok(JsValue::Undefined);
+            };
+            if let Some(callbacks) = l_remove.borrow_mut().get_mut(&(id_remove_evt.clone(), evt)) {
+                callbacks.retain(|candidate| !same_js_callback(candidate, callback));
+            }
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let l_dispatch = listeners.clone();
+    let r_dispatch = root.clone();
+    let id_dispatch = elem_id.clone();
+    elem_obj.set(
+        "dispatchEvent",
+        JsValue::native("dispatchEvent", move |vm, args| {
+            let Some(JsValue::Object(event_obj)) = args.first() else {
+                return Err("TypeError: dispatchEvent expects an Event object".to_string());
+            };
+            let event_type = event_obj.borrow().get("type").to_js_string();
+            if event_type.is_empty() {
+                return Err("InvalidStateError: event type is empty".to_string());
+            }
+            let bubbles = event_obj.borrow().get("bubbles").is_truthy();
+            let path_ids = {
+                let root = r_dispatch.borrow();
+                let Some(target) = root.find_by_id(&id_dispatch) else {
+                    return Ok(JsValue::Boolean(true));
+                };
+                let mut path = root.ancestor_ids_for(target.node_id()).unwrap_or_default();
+                if !bubbles {
+                    path.retain(|node_id| *node_id == target.node_id());
+                }
+                path
+            };
+
+            event_obj.borrow_mut().set("targetId", JsValue::String(id_dispatch.clone()));
+            for node_id in path_ids.into_iter().rev() {
+                let current_id = {
+                    let root = r_dispatch.borrow();
+                    root.find_by_node_id(node_id)
+                        .and_then(|node| match &node.node_type {
+                            wavecore_dom::NodeType::Element(element) => element.id().map(str::to_string),
+                            _ => None,
+                        })
+                };
+                let Some(current_id) = current_id else { continue; };
+                event_obj.borrow_mut().set(
+                    "currentTargetId",
+                    JsValue::String(current_id.clone()),
+                );
+                let callbacks = l_dispatch
+                    .borrow()
+                    .get(&(current_id, event_type.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                for callback in callbacks {
+                    vm.call_function(&callback, &[JsValue::Object(event_obj.clone())])?;
+                }
+            }
+
+            let prevented = match event_obj.borrow().get("_isDefaultPrevented") {
+                callback @ (JsValue::NativeFunction(_, _) | JsValue::Function(_)) => {
+                    vm.call_function(&callback, &[])?.is_truthy()
+                }
+                _ => false,
+            };
+            Ok(JsValue::Boolean(!prevented))
         }),
     );
 
