@@ -27,9 +27,62 @@ impl Parser {
             self.var_declaration()
         } else if self.match_token(&TokenKind::Function) {
             self.function_declaration()
+        } else if self.match_token(&TokenKind::Class) {
+            self.class_declaration()
         } else {
             self.statement()
         }
+    }
+
+    fn class_declaration(&mut self) -> Result<Stmt, String> {
+        let name = match self.advance().kind {
+            TokenKind::Identifier(name) => name,
+            _ => return Err(format!("Expected class name at line {}", self.previous().line)),
+        };
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after class name")?;
+
+        let mut methods = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            let method_name = match self.advance().kind {
+                TokenKind::Identifier(name) => name,
+                _ => {
+                    return Err(format!(
+                        "Expected method name in class '{}' at line {}",
+                        name,
+                        self.previous().line
+                    ))
+                }
+            };
+            self.consume(&TokenKind::LeftParen, "Expected '(' after method name")?;
+            let mut params = Vec::new();
+            if !self.check(&TokenKind::RightParen) {
+                loop {
+                    match self.advance().kind {
+                        TokenKind::Identifier(param) => params.push(param),
+                        _ => {
+                            return Err(format!(
+                                "Expected parameter name at line {}",
+                                self.previous().line
+                            ))
+                        }
+                    }
+                    if !self.match_token(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightParen, "Expected ')' after method parameters")?;
+            self.consume(&TokenKind::LeftBrace, "Expected '{' before method body")?;
+            let body = self.block_statement()?;
+            methods.push(ClassMethod {
+                name: method_name,
+                params,
+                body,
+            });
+        }
+
+        self.consume(&TokenKind::RightBrace, "Expected '}' after class body")?;
+        Ok(Stmt::ClassDecl { name, methods })
     }
 
     fn var_declaration(&mut self) -> Result<Stmt, String> {
