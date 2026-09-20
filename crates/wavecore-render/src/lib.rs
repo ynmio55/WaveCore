@@ -25,6 +25,7 @@ pub enum DisplayCommand {
 
 #[derive(Debug, Clone)]
 pub struct CompositorLayer {
+    pub node_id: Option<u64>,
     pub z_index: i32,
     pub opacity: f32,
     pub bounds: Rect,
@@ -69,6 +70,7 @@ fn collect_layers(layout: &LayoutBox, layers: &mut Vec<CompositorLayer>) {
     let mut commands = Vec::new();
     walk_self(layout, &mut commands);
     layers.push(CompositorLayer {
+        node_id: layout.node_id.map(|id| id.0),
         z_index: layout.z_index,
         opacity: layout.opacity,
         bounds: layout.rect,
@@ -204,6 +206,69 @@ pub fn append_canvas_commands(
     }
     for child in &layout.children {
         append_canvas_commands(child, registry, out);
+    }
+}
+
+
+pub fn append_canvas_to_compositor_frame(
+    layout: &LayoutBox,
+    registry: &HashMap<u64, Vec<Canvas2DCommand>>,
+    frame: &mut CompositorFrame,
+) {
+    if layout.is_canvas {
+        if let Some(node_id) = layout.node_id.map(|id| id.0) {
+            if let Some(commands) = registry.get(&node_id) {
+                if let Some(layer) = frame.layers.iter_mut().find(|layer| layer.node_id == Some(node_id)) {
+                    layer.commands.push(DisplayCommand::PushClip(layout.content));
+                    for command in commands {
+                        match command {
+                            Canvas2DCommand::FillRect { x, y, width, height, color } => {
+                                layer.commands.push(DisplayCommand::FillRect {
+                                    rect: Rect {
+                                        x: layout.content.x + *x,
+                                        y: layout.content.y + *y,
+                                        width: *width,
+                                        height: *height,
+                                    },
+                                    color: color.clone(),
+                                });
+                            }
+                            Canvas2DCommand::StrokeRect {
+                                x,
+                                y,
+                                width,
+                                height,
+                                color,
+                                line_width,
+                            } => {
+                                let w = line_width.max(1.0);
+                                layer.commands.push(DisplayCommand::Border {
+                                    rect: Rect {
+                                        x: layout.content.x + *x,
+                                        y: layout.content.y + *y,
+                                        width: *width,
+                                        height: *height,
+                                    },
+                                    widths: Edges {
+                                        top: w,
+                                        right: w,
+                                        bottom: w,
+                                        left: w,
+                                    },
+                                    color: color.clone(),
+                                    radius: 0.0,
+                                });
+                            }
+                        }
+                    }
+                    layer.commands.push(DisplayCommand::PopClip);
+                }
+            }
+        }
+    }
+
+    for child in &layout.children {
+        append_canvas_to_compositor_frame(child, registry, frame);
     }
 }
 
