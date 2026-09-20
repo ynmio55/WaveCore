@@ -13,7 +13,9 @@ pub enum WebGlCommand {
     ClearColor([f32; 4]),
     Clear { mask: u32 },
     UploadArrayBuffer { id: u32, data: Vec<f32> },
+    UploadElementArrayBuffer { id: u32, data: Vec<u32> },
     BindArrayBuffer(Option<u32>),
+    BindElementArrayBuffer(Option<u32>),
     VertexAttribPointer {
         index: u32,
         size: u32,
@@ -28,6 +30,7 @@ pub enum WebGlCommand {
     EnableVertexAttribArray(u32),
     UseProgram(Option<u32>),
     DrawArrays { mode: u32, first: u32, count: u32 },
+    DrawElements { mode: u32, count: u32, element_type: u32, offset_bytes: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
