@@ -570,6 +570,8 @@ fn build_webgl_draws(
     let mut draws = Vec::new();
     let mut clear_color = [0.0, 0.0, 0.0, 0.0];
     let mut buffers: HashMap<u32, Vec<f32>> = HashMap::new();
+    let mut element_buffers: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut bound_element_buffer: Option<u32> = None;
     let mut attributes: HashMap<u32, AttribState> = HashMap::new();
     let mut viewport = [0.0f32, 0.0, bounds.width, bounds.height];
 
@@ -640,6 +642,12 @@ fn build_webgl_draws(
             }
             WebGlCommand::UploadArrayBuffer { id, data } => {
                 buffers.insert(*id, data.clone());
+            }
+            WebGlCommand::UploadElementArrayBuffer { id, data } => {
+                element_buffers.insert(*id, data.clone());
+            }
+            WebGlCommand::BindElementArrayBuffer(id) => {
+                bound_element_buffer = *id;
             }
             WebGlCommand::VertexAttribPointer {
                 index,
@@ -775,6 +783,124 @@ fn build_webgl_draws(
                     let vertex_buffer = device.create_buffer_init(
                         &wgpu::util::BufferInitDescriptor {
                             label: Some("WaveCore WebGL Draw Vertices"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    );
+                    draws.push(GpuWebGlDraw {
+                        vertex_buffer,
+                        vertex_count: vertices.len() as u32,
+                        scissor: layer_scissor(bounds, scroll_y, viewport_width, viewport_height),
+                    });
+                }
+            }
+            WebGlCommand::DrawElements {
+                mode,
+                count,
+                element_type,
+                offset_bytes,
+            } if *mode == 0x0004 => {
+                let Some(index_buffer_id) = bound_element_buffer else {
+                    continue;
+                };
+                let Some(index_data) = element_buffers.get(&index_buffer_id) else {
+                    continue;
+                };
+                let index_size = match *element_type {
+                    0x1403 => 2usize,
+                    0x1405 => 4usize,
+                    _ => continue,
+                };
+                let start_index = (*offset_bytes as usize) / index_size;
+                let end_index = start_index.saturating_add(*count as usize).min(index_data.len());
+
+                let Some(position_state) = attributes.get(&0).copied() else {
+                    continue;
+                };
+                if !position_state.enabled {
+                    continue;
+                }
+                let Some(position_buffer_id) = position_state.buffer_id else {
+                    continue;
+                };
+                let Some(position_data) = buffers.get(&position_buffer_id) else {
+                    continue;
+                };
+
+                let color_state = attributes.get(&1).copied().unwrap_or(AttribState {
+                    buffer_id: None,
+                    size: 4,
+                    stride: 0,
+                    offset: 0,
+                    enabled: false,
+                    constant: [1.0, 1.0, 1.0, 1.0],
+                });
+                let position_stride = if position_state.stride == 0 {
+                    position_state.size
+                } else {
+                    position_state.stride
+                };
+                let color_stride = if color_state.stride == 0 {
+                    color_state.size
+                } else {
+                    color_state.stride
+                };
+
+                let mut vertices = Vec::new();
+                for vertex_index in index_data[start_index..end_index].iter().copied() {
+                    let vertex_index = vertex_index as usize;
+                    let pos_base =
+                        position_state.offset + vertex_index.saturating_mul(position_stride);
+                    if pos_base >= position_data.len() {
+                        continue;
+                    }
+                    let x = position_data.get(pos_base).copied().unwrap_or(0.0);
+                    let y = position_data.get(pos_base + 1).copied().unwrap_or(0.0);
+
+                    let color = if color_state.enabled {
+                        if let Some(color_buffer_id) = color_state.buffer_id {
+                            if let Some(color_data) = buffers.get(&color_buffer_id) {
+                                let base =
+                                    color_state.offset + vertex_index.saturating_mul(color_stride);
+                                [
+                                    color_data.get(base).copied().unwrap_or(0.0),
+                                    color_data.get(base + 1).copied().unwrap_or(0.0),
+                                    color_data.get(base + 2).copied().unwrap_or(0.0),
+                                    color_data.get(base + 3).copied().unwrap_or(1.0)
+                                        * layer_opacity,
+                                ]
+                            } else {
+                                color_state.constant
+                            }
+                        } else {
+                            color_state.constant
+                        }
+                    } else {
+                        [
+                            color_state.constant[0],
+                            color_state.constant[1],
+                            color_state.constant[2],
+                            color_state.constant[3] * layer_opacity,
+                        ]
+                    };
+
+                    let vx = viewport[0] + ((x + 1.0) * 0.5) * viewport[2];
+                    let vy = viewport[1] + (1.0 - (y + 1.0) * 0.5) * viewport[3];
+                    let sx = bounds.x + vx;
+                    let sy = bounds.y - scroll_y + vy;
+                    let ndc_x = sx / viewport_width * 2.0 - 1.0;
+                    let ndc_y = 1.0 - sy / viewport_height * 2.0;
+
+                    vertices.push(WebGlVertex {
+                        position: [ndc_x, ndc_y],
+                        color,
+                    });
+                }
+
+                if vertices.len() >= 3 {
+                    let vertex_buffer = device.create_buffer_init(
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("WaveCore WebGL Indexed Vertices"),
                             contents: bytemuck::cast_slice(&vertices),
                             usage: wgpu::BufferUsages::VERTEX,
                         },
