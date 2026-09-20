@@ -334,6 +334,10 @@ impl VM {
         callee: &JsValue,
         args: &[JsValue],
     ) -> Result<JsValue, String> {
+        // Microtasks run at the end of the current JS turn, not after every nested
+        // function/native call. External callbacks (timers/rAF) start with no active
+        // VM frame, so they still flush their microtasks before returning to the host.
+        let should_drain_microtasks = self.frames.is_empty();
         match callee {
             JsValue::Function(f) => {
                 let env = match &f.closure_env {
@@ -363,12 +367,16 @@ impl VM {
                 });
 
                 let res = self.run_until(target_depth)?;
-                self.drain_microtasks()?;
+                if should_drain_microtasks {
+                    self.drain_microtasks()?;
+                }
                 Ok(res)
             }
             JsValue::NativeFunction(_, func) => {
                 let res = func(self, args)?;
-                self.drain_microtasks()?;
+                if should_drain_microtasks {
+                    self.drain_microtasks()?;
+                }
                 Ok(res)
             }
             _ => Err(format!("'{}' is not callable", callee.to_js_string())),
