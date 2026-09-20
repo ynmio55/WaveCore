@@ -1668,8 +1668,8 @@ impl VM {
                                             });
                                         } else {
                                             vm.queue_microtask(move |vm| {
-                                                if let Some(callback) = callback {
-                                                    let _ = vm.call_function(&callback, &[]);
+                                                if let Some(callback) = callback.as_ref() {
+                                                    let _ = vm.call_function(callback, &[]);
                                                 }
                                                 vm.settle_promise(&child_for_task, state.clone());
                                                 Ok(())
