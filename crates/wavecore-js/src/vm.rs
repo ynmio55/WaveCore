@@ -229,9 +229,72 @@ impl VM {
                 Ok(JsValue::Boolean(is_arr))
             }),
         );
+        array_obj.set(
+            "from",
+            JsValue::native("from", |_vm, args| {
+                let Some(source) = args.first() else {
+                    return Ok(JsValue::new_array(Vec::new()));
+                };
+                match source {
+                    JsValue::Array(items) => Ok(JsValue::new_array(items.borrow().clone())),
+                    JsValue::String(text) => Ok(JsValue::new_array(
+                        text.chars()
+                            .map(|ch| JsValue::String(ch.to_string()))
+                            .collect(),
+                    )),
+                    _ => Ok(JsValue::new_array(Vec::new())),
+                }
+            }),
+        );
         self.globals.insert(
             "Array".to_string(),
             JsValue::Object(Rc::new(RefCell::new(array_obj))),
+        );
+
+        // Object helpers used by common framework/runtime code.
+        let mut object_obj = JsObject::new();
+        object_obj.set(
+            "keys",
+            JsValue::native("keys", |_vm, args| {
+                let mut keys = match args.first() {
+                    Some(JsValue::Object(obj)) => obj
+                        .borrow()
+                        .properties
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    Some(JsValue::Array(items)) => (0..items.borrow().len())
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                keys.sort();
+                Ok(JsValue::new_array(
+                    keys.into_iter().map(JsValue::String).collect(),
+                ))
+            }),
+        );
+        object_obj.set(
+            "assign",
+            JsValue::native("assign", |_vm, args| {
+                let target = args.first().cloned().unwrap_or_else(JsValue::new_object);
+                let JsValue::Object(target_obj) = &target else {
+                    return Ok(target);
+                };
+                for source in args.iter().skip(1) {
+                    if let JsValue::Object(source_obj) = source {
+                        let properties = source_obj.borrow().properties.clone();
+                        for (key, value) in properties {
+                            target_obj.borrow_mut().set(key, value);
+                        }
+                    }
+                }
+                Ok(target)
+            }),
+        );
+        self.globals.insert(
+            "Object".to_string(),
+            JsValue::Object(Rc::new(RefCell::new(object_obj))),
         );
 
         // Typed arrays used heavily by graphics/media workloads. Pulse currently
