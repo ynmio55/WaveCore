@@ -254,4 +254,25 @@ mod tests {
         assert!(matches!(result, JsValue::Number(v) if v >= 0.0));
     }
 
+    #[test]
+    fn performance_now_and_microtasks_are_available() {
+        let root = Rc::new(RefCell::new(Node::document(vec![])));
+        let bridge = DomBridge::new(root);
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        let result = eval_script(
+            r#"
+                let observed = 0;
+                queueMicrotask(function() { observed = 7; });
+                let t = performance.now();
+                observed + (t >= 0 ? 1 : 0);
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(result, JsValue::Number(8.0));
+    }
+
 }
