@@ -322,4 +322,69 @@ mod tests {
         assert_eq!(result, JsValue::Number(11.0));
     }
 
+    #[test]
+    fn json_parse_and_stringify_round_trip_objects_and_arrays() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let obj = JSON.parse("{\"name\":\"WaveCore\",\"values\":[1,2,3],\"ok\":true}");
+                let encoded = JSON.stringify(obj);
+                let again = JSON.parse(encoded);
+                again.name + ":" + again.values[1] + ":" + again.ok;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::String("WaveCore:2:true".to_string()));
+    }
+
+    #[test]
+    fn promise_all_and_race_resolve_immediate_values() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let total = 0;
+                Promise.all([Promise.resolve(2), 3, Promise.resolve(5)])
+                    .then(function(values) {
+                        total = values[0] + values[1] + values[2];
+                    });
+                let winner = 0;
+                Promise.race([Promise.resolve(9), Promise.resolve(10)])
+                    .then(function(value) {
+                        winner = value;
+                    });
+                total + winner;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+        assert_eq!(result, JsValue::Number(19.0));
+    }
+
+    #[test]
+    fn fetch_response_json_returns_parsed_object() {
+        let root = Rc::new(RefCell::new(Node::document(vec![])));
+        let bridge = DomBridge::with_url(root, "https://wavecore.local/");
+        let mut vm = VM::new();
+        bridge.attach_to_vm(&mut vm);
+
+        let result = eval_script(
+            r#"
+                let value = 0;
+                fetch("data:application/json,{\"value\":42}")
+                    .then(function(response) {
+                        return response.json();
+                    })
+                    .then(function(body) {
+                        value = body.value;
+                    });
+                value;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(result, JsValue::Number(42.0));
+    }
+
 }
