@@ -226,7 +226,6 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
-                cache: None,
             });
 
         let webgl_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -298,7 +297,6 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
-                cache: None,
             });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
