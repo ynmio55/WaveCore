@@ -89,6 +89,13 @@ pub enum Expr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ClassMethod {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     VarDecl {
         name: String,
@@ -115,6 +122,10 @@ pub enum Stmt {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+    },
+    ClassDecl {
+        name: String,
+        methods: Vec<ClassMethod>,
     },
     Return(Option<Expr>),
     TryCatch {
