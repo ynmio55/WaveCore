@@ -27,6 +27,19 @@ struct TimerEntry {
     kind: TimerKind,
 }
 
+#[derive(Clone, Copy)]
+enum CanvasPathPrimitive {
+    Line { x1: f32, y1: f32, x2: f32, y2: f32 },
+    Circle { cx: f32, cy: f32, radius: f32 },
+}
+
+#[derive(Default)]
+struct CanvasPathState {
+    primitives: Vec<CanvasPathPrimitive>,
+    current: Option<(f32, f32)>,
+    first: Option<(f32, f32)>,
+}
+
 pub struct DomBridge {
     pub root: Rc<RefCell<Node>>,
     pub listeners: Rc<RefCell<HashMap<(String, String), Vec<JsValue>>>>,
@@ -1051,14 +1064,114 @@ fn create_canvas_2d_context(
         }),
     );
 
+    // clearRect remains conservative until the display-list backend supports
+    // destination-out/transparent replacement semantics.
     ctx.set("clearRect", JsValue::native("clearRect", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("beginPath", JsValue::native("beginPath", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("moveTo", JsValue::native("moveTo", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("lineTo", JsValue::native("lineTo", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("arc", JsValue::native("arc", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("closePath", JsValue::native("closePath", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("fill", JsValue::native("fill", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("stroke", JsValue::native("stroke", |_vm, _args| Ok(JsValue::Undefined)));
+
+    let path = Rc::new(RefCell::new(CanvasPathState::default()));
+
+    let path_begin = path.clone();
+    ctx.set("beginPath", JsValue::native("beginPath", move |_vm, _args| {
+        *path_begin.borrow_mut() = CanvasPathState::default();
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_move = path.clone();
+    ctx.set("moveTo", JsValue::native("moveTo", move |_vm, args| {
+        let x = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let y = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let mut state = path_move.borrow_mut();
+        state.current = Some((x, y));
+        state.first = Some((x, y));
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_line = path.clone();
+    ctx.set("lineTo", JsValue::native("lineTo", move |_vm, args| {
+        let x = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let y = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let mut state = path_line.borrow_mut();
+        let (x1, y1) = state.current.unwrap_or((0.0, 0.0));
+        if state.first.is_none() {
+            state.first = Some((x1, y1));
+        }
+        state.primitives.push(CanvasPathPrimitive::Line { x1, y1, x2: x, y2: y });
+        state.current = Some((x, y));
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_arc = path.clone();
+    ctx.set("arc", JsValue::native("arc", move |_vm, args| {
+        let cx = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let cy = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let radius = args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0).max(0.0);
+        if radius > 0.0 {
+            let mut state = path_arc.borrow_mut();
+            state.primitives.push(CanvasPathPrimitive::Circle { cx, cy, radius });
+            let end_x = cx + radius;
+            let end_y = cy;
+            if state.first.is_none() {
+                state.first = Some((end_x, end_y));
+            }
+            state.current = Some((end_x, end_y));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_close = path.clone();
+    ctx.set("closePath", JsValue::native("closePath", move |_vm, _args| {
+        let mut state = path_close.borrow_mut();
+        if let (Some((x1, y1)), Some((x2, y2))) = (state.current, state.first) {
+            if (x1 - x2).abs() > f32::EPSILON || (y1 - y2).abs() > f32::EPSILON {
+                state.primitives.push(CanvasPathPrimitive::Line { x1, y1, x2, y2 });
+            }
+            state.current = Some((x2, y2));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_fill = path.clone();
+    let reg_path_fill = registry.clone();
+    let fill_for_path = fill_style.clone();
+    ctx.set("fill", JsValue::native("fill", move |_vm, _args| {
+        let color = fill_for_path.borrow().clone();
+        let primitives = path_fill.borrow().primitives.clone();
+        let mut registry = reg_path_fill.borrow_mut();
+        let commands = registry.entry(node_id).or_default();
+        for primitive in primitives {
+            if let CanvasPathPrimitive::Circle { cx, cy, radius } = primitive {
+                commands.push(Canvas2DCommand::FillCircle { cx, cy, radius, color: color.clone() });
+            }
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_stroke = path.clone();
+    let reg_path_stroke = registry.clone();
+    let stroke_for_path = stroke_style.clone();
+    let width_for_path = line_width.clone();
+    ctx.set("stroke", JsValue::native("stroke", move |_vm, _args| {
+        let color = stroke_for_path.borrow().clone();
+        let width = width_for_path.get();
+        let primitives = path_stroke.borrow().primitives.clone();
+        let mut registry = reg_path_stroke.borrow_mut();
+        let commands = registry.entry(node_id).or_default();
+        for primitive in primitives {
+            match primitive {
+                CanvasPathPrimitive::Line { x1, y1, x2, y2 } => {
+                    commands.push(Canvas2DCommand::DrawLine {
+                        x1, y1, x2, y2, color: color.clone(), line_width: width,
+                    });
+                }
+                CanvasPathPrimitive::Circle { cx, cy, radius } => {
+                    commands.push(Canvas2DCommand::StrokeCircle {
+                        cx, cy, radius, color: color.clone(), line_width: width,
+                    });
+                }
+            }
+        }
+        Ok(JsValue::Undefined)
+    }));
 
     ctx
 }
