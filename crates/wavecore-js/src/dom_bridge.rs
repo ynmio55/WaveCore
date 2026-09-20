@@ -231,6 +231,31 @@ impl DomBridge {
         window.set("location", location_val);
         window.set("history", history_val);
 
+        // High-resolution monotonic timing API.
+        let perf_origin = self.time_origin.clone();
+        let mut performance = JsObject::new();
+        performance.set(
+            "now",
+            JsValue::native("now", move |_vm, _args| {
+                Ok(JsValue::Number(perf_origin.elapsed().as_secs_f64() * 1000.0))
+            }),
+        );
+        let performance_val = JsValue::Object(Rc::new(RefCell::new(performance)));
+        window.set("performance", performance_val.clone());
+        vm.set_global("performance", performance_val);
+
+        // queueMicrotask(callback) schedules work after the current JS turn.
+        let queue_microtask = JsValue::native("queueMicrotask", move |vm, args| {
+            if let Some(callback) = args.first().cloned() {
+                vm.queue_microtask(move |vm| {
+                    vm.call_function(&callback, &[]).map(|_| ())
+                });
+            }
+            Ok(JsValue::Undefined)
+        });
+        window.set("queueMicrotask", queue_microtask.clone());
+        vm.set_global("queueMicrotask", queue_microtask);
+
         // window.alert
         window.set(
             "alert",
