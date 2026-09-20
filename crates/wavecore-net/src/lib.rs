@@ -142,6 +142,7 @@ pub enum NetError {
     Network(String),
     Io(std::io::Error),
     InvalidUrl(String),
+    BlockedScheme(String),
     TooManyRedirects(usize),
     Cors(String),
     CertificateInvalid(String),
@@ -154,6 +155,7 @@ impl std::fmt::Display for NetError {
             NetError::Network(s) => write!(f, "Network error: {s}"),
             NetError::Io(e) => write!(f, "IO error: {e}"),
             NetError::InvalidUrl(s) => write!(f, "Invalid URL: {s}"),
+            NetError::BlockedScheme(s) => write!(f, "Blocked resource scheme: {s}"),
             NetError::TooManyRedirects(n) => write!(f, "Exceeded maximum redirect limit ({n})"),
             NetError::Cors(s) => write!(f, "{s}"),
             NetError::CertificateInvalid(s) => write!(f, "SSL/TLS certificate error: {s}"),
@@ -221,6 +223,22 @@ impl NetworkClient {
         caller_origin: Option<&Origin>,
     ) -> Result<HttpResponse, NetError> {
         let trimmed = url_or_path.trim();
+
+        // Web-origin fetches are never allowed to escape the network sandbox into
+        // local filesystem or privileged URL schemes.
+        if caller_origin.is_some()
+            && !trimmed.starts_with("http://")
+            && !trimmed.starts_with("https://")
+            && !trimmed.starts_with("data:")
+        {
+            return Err(NetError::BlockedScheme(
+                trimmed
+                    .split(':')
+                    .next()
+                    .unwrap_or("local-file")
+                    .to_ascii_lowercase(),
+            ));
+        }
 
         // 1. Data URIs (RFC 2397)
         if trimmed.starts_with("data:") {
@@ -382,6 +400,20 @@ impl NetworkClient {
                             } else {
                                 loc.to_string()
                             };
+                            let parsed_next = Url::parse(&next_url)
+                                .map_err(|e| NetError::InvalidUrl(e.to_string()))?;
+                            if !matches!(parsed_next.scheme(), "http" | "https") {
+                                return Err(NetError::BlockedScheme(
+                                    parsed_next.scheme().to_string(),
+                                ));
+                            }
+                            let parsed_next = Url::parse(&next_url)
+                                .map_err(|e| NetError::InvalidUrl(e.to_string()))?;
+                            if !matches!(parsed_next.scheme(), "http" | "https") {
+                                return Err(NetError::BlockedScheme(
+                                    parsed_next.scheme().to_string(),
+                                ));
+                            }
                             current_url = next_url;
                             redirect_count += 1;
                             continue;
@@ -683,6 +715,24 @@ mod tests {
                 actual_bytes: 10
             }
         ));
+    }
+
+    #[test]
+    fn web_origin_fetch_cannot_read_local_files_or_privileged_schemes() {
+        let mut client = NetworkClient::new();
+        let origin = Origin::parse("https://app.example.com").unwrap();
+
+        let local = client.fetch_with_origin("file:///etc/passwd", Some(&origin));
+        assert!(matches!(local, Err(NetError::BlockedScheme(_))));
+
+        let relative = client.fetch_with_origin("../../secret.txt", Some(&origin));
+        assert!(matches!(relative, Err(NetError::BlockedScheme(_))));
+
+        let javascript = client.fetch_with_origin("javascript:alert(1)", Some(&origin));
+        assert!(matches!(javascript, Err(NetError::BlockedScheme(_))));
+
+        let data = client.fetch_with_origin("data:text/plain,ok", Some(&origin));
+        assert!(data.is_ok());
     }
 
 }
