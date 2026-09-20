@@ -13,10 +13,17 @@ use crate::vm::VM;
 
 static ELEMENT_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
+#[derive(Clone, Copy)]
+enum TimerKind {
+    Timeout,
+    AnimationFrame,
+}
+
 #[derive(Clone)]
 struct TimerEntry {
     due: Instant,
     callback: JsValue,
+    kind: TimerKind,
 }
 
 pub struct DomBridge {
@@ -25,6 +32,7 @@ pub struct DomBridge {
     pub current_url: Rc<RefCell<String>>,
     pub history_stack: Rc<RefCell<Vec<String>>>,
     timer_callbacks: Rc<RefCell<HashMap<usize, TimerEntry>>>,
+    time_origin: Rc<Instant>,
     network_client: Rc<RefCell<NetworkClient>>,
     canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
     webgl_commands: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
@@ -38,6 +46,7 @@ impl DomBridge {
             current_url: Rc::new(RefCell::new("https://wavecore.local/".to_string())),
             history_stack: Rc::new(RefCell::new(vec!["https://wavecore.local/".to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
+            time_origin: Rc::new(Instant::now()),
             network_client: Rc::new(RefCell::new(NetworkClient::new())),
             canvas_commands: Rc::new(RefCell::new(HashMap::new())),
             webgl_commands: Rc::new(RefCell::new(HashMap::new())),
@@ -255,6 +264,7 @@ impl DomBridge {
                     TimerEntry {
                         due: Instant::now() + Duration::from_millis(delay_ms),
                         callback: cb,
+                        kind: TimerKind::Timeout,
                     },
                 );
                 Ok(JsValue::Number(id as f64))
@@ -273,6 +283,37 @@ impl DomBridge {
         });
         window.set("clearTimeout", clear_timeout_fn.clone());
         vm.set_global("clearTimeout", clear_timeout_fn);
+
+        // requestAnimationFrame / cancelAnimationFrame. The browser event loop batches
+        // callbacks on a ~60 Hz cadence; the callback receives a monotonic timestamp.
+        let raf_timers = self.timer_callbacks.clone();
+        let request_animation_frame = JsValue::native("requestAnimationFrame", move |_vm, args| {
+            if let Some(cb) = args.first().cloned() {
+                let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                raf_timers.borrow_mut().insert(
+                    id,
+                    TimerEntry {
+                        due: Instant::now() + Duration::from_millis(16),
+                        callback: cb,
+                        kind: TimerKind::AnimationFrame,
+                    },
+                );
+                Ok(JsValue::Number(id as f64))
+            } else {
+                Ok(JsValue::Number(0.0))
+            }
+        });
+        window.set("requestAnimationFrame", request_animation_frame.clone());
+        vm.set_global("requestAnimationFrame", request_animation_frame);
+
+        let cancel_raf_timers = self.timer_callbacks.clone();
+        let cancel_animation_frame = JsValue::native("cancelAnimationFrame", move |_vm, args| {
+            let id = args.first().map(|a| a.to_number() as usize).unwrap_or(0);
+            cancel_raf_timers.borrow_mut().remove(&id);
+            Ok(JsValue::Undefined)
+        });
+        window.set("cancelAnimationFrame", cancel_animation_frame.clone());
+        vm.set_global("cancelAnimationFrame", cancel_animation_frame);
 
         vm.set_global("window", JsValue::Object(Rc::new(RefCell::new(window))));
 
@@ -366,14 +407,25 @@ impl DomBridge {
             let mut timers = self.timer_callbacks.borrow_mut();
             for id in due_ids {
                 if let Some(entry) = timers.remove(&id) {
-                    callbacks.push(entry.callback);
+                    callbacks.push(entry);
                 }
             }
         }
 
         let count = callbacks.len();
-        for cb in callbacks {
-            let _ = vm.call_function(&cb, &[]);
+        let timestamp_ms = self.time_origin.elapsed().as_secs_f64() * 1000.0;
+        for entry in callbacks {
+            match entry.kind {
+                TimerKind::Timeout => {
+                    let _ = vm.call_function(&entry.callback, &[]);
+                }
+                TimerKind::AnimationFrame => {
+                    let _ = vm.call_function(
+                        &entry.callback,
+                        &[JsValue::Number(timestamp_ms)],
+                    );
+                }
+            }
         }
         count
     }
