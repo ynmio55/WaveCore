@@ -68,6 +68,70 @@ fn make_typed_array(source: Option<&JsValue>, kind: TypedArrayKind) -> JsValue {
     JsValue::new_array(values)
 }
 
+fn json_to_js(value: &serde_json::Value) -> JsValue {
+    match value {
+        serde_json::Value::Null => JsValue::Null,
+        serde_json::Value::Bool(v) => JsValue::Boolean(*v),
+        serde_json::Value::Number(v) => JsValue::Number(v.as_f64().unwrap_or(f64::NAN)),
+        serde_json::Value::String(v) => JsValue::String(v.clone()),
+        serde_json::Value::Array(items) => {
+            JsValue::new_array(items.iter().map(json_to_js).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut obj = JsObject::new();
+            for (key, value) in map {
+                obj.set(key.clone(), json_to_js(value));
+            }
+            JsValue::Object(Rc::new(RefCell::new(obj)))
+        }
+    }
+}
+
+fn js_to_json(value: &JsValue, depth: usize) -> Result<serde_json::Value, String> {
+    if depth > 128 {
+        return Err("JSON.stringify exceeded maximum nesting depth".to_string());
+    }
+    Ok(match value {
+        JsValue::Undefined
+        | JsValue::Function(_)
+        | JsValue::NativeFunction(_, _)
+        | JsValue::Promise(_) => serde_json::Value::Null,
+        JsValue::Null => serde_json::Value::Null,
+        JsValue::Boolean(v) => serde_json::Value::Bool(*v),
+        JsValue::Number(v) => {
+            if !v.is_finite() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Number::from_f64(*v)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }
+        JsValue::String(v) => serde_json::Value::String(v.clone()),
+        JsValue::Array(items) => serde_json::Value::Array(
+            items
+                .borrow()
+                .iter()
+                .map(|item| js_to_json(item, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        JsValue::Object(obj) => {
+            let borrowed = obj.borrow();
+            let mut map = serde_json::Map::new();
+            for (key, value) in &borrowed.properties {
+                if matches!(
+                    value,
+                    JsValue::Undefined | JsValue::Function(_) | JsValue::NativeFunction(_, _)
+                ) {
+                    continue;
+                }
+                map.insert(key.clone(), js_to_json(value, depth + 1)?);
+            }
+            serde_json::Value::Object(map)
+        }
+    })
+}
+
 impl VM {
     pub fn new() -> Self {
         let global_env = Rc::new(RefCell::new(Environment::new()));
@@ -212,7 +276,19 @@ impl VM {
             "stringify",
             JsValue::native("stringify", |_vm, args| {
                 let val = args.first().cloned().unwrap_or(JsValue::Undefined);
-                Ok(JsValue::String(val.to_js_string()))
+                let json_value = js_to_json(&val, 0)?;
+                serde_json::to_string(&json_value)
+                    .map(JsValue::String)
+                    .map_err(|e| format!("JSON.stringify failed: {e}"))
+            }),
+        );
+        json.set(
+            "parse",
+            JsValue::native("parse", |_vm, args| {
+                let text = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| format!("JSON.parse failed: {e}"))?;
+                Ok(json_to_js(&parsed))
             }),
         );
         self.globals.insert(
@@ -343,6 +419,69 @@ impl VM {
                 Ok(JsValue::Promise(Rc::new(RefCell::new(
                     JsPromise::rejected(err),
                 ))))
+            }),
+        );
+        promise_obj.set(
+            "all",
+            JsValue::native("all", |_vm, args| {
+                let Some(JsValue::Array(items)) = args.first() else {
+                    return Ok(JsValue::Promise(Rc::new(RefCell::new(
+                        JsPromise::resolved(JsValue::new_array(Vec::new())),
+                    ))));
+                };
+                let mut values = Vec::with_capacity(items.borrow().len());
+                for item in items.borrow().iter() {
+                    match item {
+                        JsValue::Promise(promise) => match &promise.borrow().state {
+                            PromiseState::Fulfilled(value) => values.push(value.clone()),
+                            PromiseState::Rejected(err) => {
+                                return Ok(JsValue::Promise(Rc::new(RefCell::new(
+                                    JsPromise::rejected(err.clone()),
+                                ))));
+                            }
+                            PromiseState::Pending => {
+                                return Ok(JsValue::Promise(Rc::new(RefCell::new(
+                                    JsPromise::pending(),
+                                ))));
+                            }
+                        },
+                        other => values.push(other.clone()),
+                    }
+                }
+                Ok(JsValue::Promise(Rc::new(RefCell::new(
+                    JsPromise::resolved(JsValue::new_array(values)),
+                ))))
+            }),
+        );
+        promise_obj.set(
+            "race",
+            JsValue::native("race", |_vm, args| {
+                let Some(JsValue::Array(items)) = args.first() else {
+                    return Ok(JsValue::Promise(Rc::new(RefCell::new(JsPromise::pending()))));
+                };
+                for item in items.borrow().iter() {
+                    match item {
+                        JsValue::Promise(promise) => match &promise.borrow().state {
+                            PromiseState::Fulfilled(value) => {
+                                return Ok(JsValue::Promise(Rc::new(RefCell::new(
+                                    JsPromise::resolved(value.clone()),
+                                ))));
+                            }
+                            PromiseState::Rejected(err) => {
+                                return Ok(JsValue::Promise(Rc::new(RefCell::new(
+                                    JsPromise::rejected(err.clone()),
+                                ))));
+                            }
+                            PromiseState::Pending => {}
+                        },
+                        other => {
+                            return Ok(JsValue::Promise(Rc::new(RefCell::new(
+                                JsPromise::resolved(other.clone()),
+                            ))));
+                        }
+                    }
+                }
+                Ok(JsValue::Promise(Rc::new(RefCell::new(JsPromise::pending()))))
             }),
         );
         self.globals.insert(
