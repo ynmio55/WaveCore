@@ -1478,6 +1478,14 @@ fn js_u32_vec(value: &JsValue) -> Vec<u32> {
             .filter(|number| number.is_finite() && *number >= 0.0)
             .map(|number| number as u32)
             .collect(),
+        JsValue::TypedArray(items) => items
+            .borrow()
+            .values()
+            .iter()
+            .map(|item| item.to_number())
+            .filter(|number| number.is_finite() && *number >= 0.0)
+            .map(|number| number as u32)
+            .collect(),
         _ => value
             .to_js_string()
             .split(',')
@@ -1490,6 +1498,13 @@ fn js_number_vec(value: &JsValue) -> Vec<f32> {
     match value {
         JsValue::Array(items) => items
             .borrow()
+            .iter()
+            .map(|item| item.to_number() as f32)
+            .filter(|number| number.is_finite())
+            .collect(),
+        JsValue::TypedArray(items) => items
+            .borrow()
+            .values()
             .iter()
             .map(|item| item.to_number() as f32)
             .filter(|number| number.is_finite())
