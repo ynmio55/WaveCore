@@ -736,26 +736,56 @@ impl DomBridge {
         vm.set_global(
             "fetch",
             JsValue::native("fetch", move |_vm, args| {
-                let (url, method) = match args.first() {
-                    Some(JsValue::Object(request)) => (
-                        request.borrow().get("url").to_js_string(),
-                        request.borrow().get("method").to_js_string(),
-                    ),
-                    Some(other) => (other.to_js_string(), "GET".to_string()),
-                    None => (String::new(), "GET".to_string()),
-                };
-                if !method.is_empty() && !method.eq_ignore_ascii_case("GET") {
-                    return Ok(JsValue::Promise(Rc::new(RefCell::new(
-                        JsPromise::rejected(JsValue::String(format!(
-                            "fetch failed: method {method} is not implemented yet"
-                        ))),
-                    ))));
+                let mut url = String::new();
+                let mut method = "GET".to_string();
+                let mut request_headers = HashMap::new();
+                let mut body: Option<Vec<u8>> = None;
+
+                match args.first() {
+                    Some(JsValue::Object(request)) => {
+                        url = request.borrow().get("url").to_js_string();
+                        let request_method = request.borrow().get("method");
+                        if !matches!(request_method, JsValue::Undefined) {
+                            method = request_method.to_js_string().to_ascii_uppercase();
+                        }
+                        let headers = request.borrow().get("headers");
+                        request_headers = headers_from_init(Some(&headers));
+                        let request_body = request.borrow().get("body");
+                        if !matches!(request_body, JsValue::Undefined | JsValue::Null) {
+                            body = Some(request_body.to_js_string().into_bytes());
+                        }
+                    }
+                    Some(other) => {
+                        url = other.to_js_string();
+                    }
+                    None => {}
                 }
+
+                if let Some(JsValue::Object(options)) = args.get(1) {
+                    let option_method = options.borrow().get("method");
+                    if !matches!(option_method, JsValue::Undefined) {
+                        method = option_method.to_js_string().to_ascii_uppercase();
+                    }
+
+                    let option_headers = options.borrow().get("headers");
+                    if !matches!(option_headers, JsValue::Undefined) {
+                        request_headers = headers_from_init(Some(&option_headers));
+                    }
+
+                    let option_body = options.borrow().get("body");
+                    if !matches!(option_body, JsValue::Undefined | JsValue::Null) {
+                        body = Some(option_body.to_js_string().into_bytes());
+                    }
+                }
+
                 let caller_origin = Origin::parse(&fetch_origin_url.borrow()).ok();
-                match fetch_client
-                    .borrow_mut()
-                    .fetch_with_origin(&url, caller_origin.as_ref())
-                {
+                match fetch_client.borrow_mut().fetch_request_with_origin(
+                    &method,
+                    &url,
+                    &request_headers,
+                    body.as_deref(),
+                    caller_origin.as_ref(),
+                ) {
                     Ok(res) => {
                         let response_val = create_response_value(
                             res.body,
