@@ -46,7 +46,9 @@ pub enum OpCode {
         chunk_index: usize,
         name: String,
         params: Vec<String>,
+        is_async: bool,
     },
+    Await,
     MakeClass {
         name: String,
         constructor: Option<(usize, Vec<String>)>,
@@ -203,7 +205,12 @@ impl Compiler {
                     self.chunk_mut().write_op(OpCode::Pop);
                 }
             }
-            Stmt::FunctionDecl { name, params, body } => {
+            Stmt::FunctionDecl {
+                name,
+                params,
+                body,
+                is_async,
+            } => {
                 let func_chunk_idx = self.chunks.len();
                 self.chunks.push(Chunk::new());
                 let old_chunk = self.current_chunk;
@@ -221,6 +228,7 @@ impl Compiler {
                     chunk_index: func_chunk_idx,
                     name: name.clone(),
                     params: params.clone(),
+                    is_async: *is_async,
                 });
                 self.chunk_mut().write_op(OpCode::DeclVar(name.clone()));
             }
@@ -384,7 +392,12 @@ impl Compiler {
                 }
                 self.chunk_mut().write_op(OpCode::CreateObject(entries.len()));
             }
-            Expr::FunctionExpr { name, params, body } => {
+            Expr::FunctionExpr {
+                name,
+                params,
+                body,
+                is_async,
+            } => {
                 let func_chunk_idx = self.chunks.len();
                 self.chunks.push(Chunk::new());
                 let old_chunk = self.current_chunk;
@@ -402,7 +415,12 @@ impl Compiler {
                     chunk_index: func_chunk_idx,
                     name: name.clone().unwrap_or_default(),
                     params: params.clone(),
+                    is_async: *is_async,
                 });
+            }
+            Expr::Await(expr) => {
+                self.compile_expr(expr)?;
+                self.chunk_mut().write_op(OpCode::Await);
             }
             Expr::New { callee, args } => {
                 self.compile_expr(callee)?;
