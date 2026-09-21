@@ -992,7 +992,15 @@ impl VM {
                     stack_start,
                     env: prev_env,
                 });
-                self.run_until(target_depth)
+                let result = self.run_until(target_depth);
+                if f.is_async {
+                    Ok(JsValue::Promise(Rc::new(RefCell::new(match result {
+                        Ok(value) => JsPromise::resolved(value),
+                        Err(error) => JsPromise::rejected(JsValue::String(error)),
+                    }))))
+                } else {
+                    result
+                }
             }
             JsValue::NativeFunction(_, func) => func(self, args),
             _ => Err(format!("'{}' is not callable", callee.to_js_string())),
@@ -1042,7 +1050,15 @@ impl VM {
                     env: prev_env,
                 });
 
-                let res = self.run_until(target_depth)?;
+                let execution = self.run_until(target_depth);
+                let res = if f.is_async {
+                    JsValue::Promise(Rc::new(RefCell::new(match execution {
+                        Ok(value) => JsPromise::resolved(value),
+                        Err(error) => JsPromise::rejected(JsValue::String(error)),
+                    })))
+                } else {
+                    execution?
+                };
                 if should_drain_microtasks {
                     self.drain_microtasks()?;
                 }
@@ -1377,6 +1393,31 @@ impl VM {
                         }
                     }
                 }
+                OpCode::Await => {
+                    let awaited = self.stack.pop().unwrap_or(JsValue::Undefined);
+                    match awaited {
+                        JsValue::Promise(promise) => {
+                            let mut state = promise.borrow().state.clone();
+                            if matches!(state, PromiseState::Pending) {
+                                self.drain_microtasks()?;
+                                state = promise.borrow().state.clone();
+                            }
+                            match state {
+                                PromiseState::Fulfilled(value) => self.stack.push(value),
+                                PromiseState::Rejected(error) => {
+                                    self.unwind_exception(error)?;
+                                }
+                                PromiseState::Pending => {
+                                    return Err(
+                                        "Await suspension requires a future host event-loop turn"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        value => self.stack.push(value),
+                    }
+                }
                 OpCode::Return => {
                     let ret = self.stack.pop().unwrap_or(JsValue::Undefined);
                     let finished_frame = self.frames.pop().unwrap();
@@ -1413,12 +1454,14 @@ impl VM {
                     chunk_index,
                     name,
                     params,
+                    is_async,
                 } => {
                     let func = JsFunction {
                         name,
                         params,
                         chunk_index,
                         closure_env: Some(self.current_env.clone()),
+                        is_async,
                     };
                     self.stack.push(JsValue::Function(Rc::new(func)));
                 }
@@ -1434,6 +1477,7 @@ impl VM {
                             params,
                             chunk_index,
                             closure_env: Some(self.current_env.clone()),
+                            is_async: false,
                         };
                         prototype.set(method_name, JsValue::Function(Rc::new(method)));
                     }
@@ -1451,6 +1495,7 @@ impl VM {
                                 params,
                                 chunk_index,
                                 closure_env: Some(self.current_env.clone()),
+                                is_async: false,
                             })),
                         );
                     } else {
