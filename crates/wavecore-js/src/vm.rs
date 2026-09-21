@@ -455,65 +455,183 @@ impl VM {
         );
         promise_obj.set(
             "all",
-            JsValue::native("all", |_vm, args| {
+            JsValue::native("all", |vm, args| {
                 let Some(JsValue::Array(items)) = args.first() else {
                     return Ok(JsValue::Promise(Rc::new(RefCell::new(
                         JsPromise::resolved(JsValue::new_array(Vec::new())),
                     ))));
                 };
-                let mut values = Vec::with_capacity(items.borrow().len());
-                for item in items.borrow().iter() {
+
+                let items = items.borrow().clone();
+                let aggregate = Rc::new(RefCell::new(JsPromise::pending()));
+                if items.is_empty() {
+                    vm.settle_promise(
+                        &aggregate,
+                        PromiseState::Fulfilled(JsValue::new_array(Vec::new())),
+                    );
+                    return Ok(JsValue::Promise(aggregate));
+                }
+
+                let values = Rc::new(RefCell::new(vec![JsValue::Undefined; items.len()]));
+                let remaining = Rc::new(Cell::new(items.len()));
+
+                for (index, item) in items.into_iter().enumerate() {
                     match item {
-                        JsValue::Promise(promise) => match &promise.borrow().state {
-                            PromiseState::Fulfilled(value) => values.push(value.clone()),
-                            PromiseState::Rejected(err) => {
-                                return Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::rejected(err.clone()),
-                                ))));
+                        JsValue::Promise(source) => {
+                            let state = source.borrow().state.clone();
+                            match state {
+                                PromiseState::Fulfilled(value) => {
+                                    values.borrow_mut()[index] = value;
+                                    remaining.set(remaining.get().saturating_sub(1));
+                                }
+                                PromiseState::Rejected(error) => {
+                                    vm.settle_promise(
+                                        &aggregate,
+                                        PromiseState::Rejected(error),
+                                    );
+                                    return Ok(JsValue::Promise(aggregate));
+                                }
+                                PromiseState::Pending => {
+                                    let values_ok = values.clone();
+                                    let remaining_ok = remaining.clone();
+                                    let aggregate_ok = aggregate.clone();
+                                    let on_fulfilled = JsValue::native(
+                                        format!("Promise.all[{index}]:fulfilled"),
+                                        move |vm, args| {
+                                            values_ok.borrow_mut()[index] = args
+                                                .first()
+                                                .cloned()
+                                                .unwrap_or(JsValue::Undefined);
+                                            let next = remaining_ok.get().saturating_sub(1);
+                                            remaining_ok.set(next);
+                                            if next == 0 {
+                                                vm.settle_promise(
+                                                    &aggregate_ok,
+                                                    PromiseState::Fulfilled(JsValue::new_array(
+                                                        values_ok.borrow().clone(),
+                                                    )),
+                                                );
+                                            }
+                                            Ok(JsValue::Undefined)
+                                        },
+                                    );
+
+                                    let aggregate_err = aggregate.clone();
+                                    let on_rejected = JsValue::native(
+                                        format!("Promise.all[{index}]:rejected"),
+                                        move |vm, args| {
+                                            vm.settle_promise(
+                                                &aggregate_err,
+                                                PromiseState::Rejected(
+                                                    args.first()
+                                                        .cloned()
+                                                        .unwrap_or(JsValue::Undefined),
+                                                ),
+                                            );
+                                            Ok(JsValue::Undefined)
+                                        },
+                                    );
+
+                                    source.borrow_mut().then_callbacks.push(PromiseReaction {
+                                        on_fulfilled: Some(on_fulfilled),
+                                        on_rejected: Some(on_rejected),
+                                        child: Rc::new(RefCell::new(JsPromise::pending())),
+                                    });
+                                }
                             }
-                            PromiseState::Pending => {
-                                return Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::pending(),
-                                ))));
-                            }
-                        },
-                        other => values.push(other.clone()),
+                        }
+                        value => {
+                            values.borrow_mut()[index] = value;
+                            remaining.set(remaining.get().saturating_sub(1));
+                        }
                     }
                 }
-                Ok(JsValue::Promise(Rc::new(RefCell::new(
-                    JsPromise::resolved(JsValue::new_array(values)),
-                ))))
+
+                if remaining.get() == 0
+                    && matches!(aggregate.borrow().state, PromiseState::Pending)
+                {
+                    vm.settle_promise(
+                        &aggregate,
+                        PromiseState::Fulfilled(JsValue::new_array(values.borrow().clone())),
+                    );
+                }
+
+                Ok(JsValue::Promise(aggregate))
             }),
         );
         promise_obj.set(
             "race",
-            JsValue::native("race", |_vm, args| {
+            JsValue::native("race", |vm, args| {
                 let Some(JsValue::Array(items)) = args.first() else {
                     return Ok(JsValue::Promise(Rc::new(RefCell::new(JsPromise::pending()))));
                 };
-                for item in items.borrow().iter() {
+
+                let aggregate = Rc::new(RefCell::new(JsPromise::pending()));
+                for item in items.borrow().iter().cloned() {
                     match item {
-                        JsValue::Promise(promise) => match &promise.borrow().state {
+                        JsValue::Promise(source) => match source.borrow().state.clone() {
                             PromiseState::Fulfilled(value) => {
-                                return Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::resolved(value.clone()),
-                                ))));
+                                vm.settle_promise(
+                                    &aggregate,
+                                    PromiseState::Fulfilled(value),
+                                );
+                                break;
                             }
-                            PromiseState::Rejected(err) => {
-                                return Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::rejected(err.clone()),
-                                ))));
+                            PromiseState::Rejected(error) => {
+                                vm.settle_promise(
+                                    &aggregate,
+                                    PromiseState::Rejected(error),
+                                );
+                                break;
                             }
-                            PromiseState::Pending => {}
+                            PromiseState::Pending => {
+                                let aggregate_ok = aggregate.clone();
+                                let on_fulfilled = JsValue::native(
+                                    "Promise.race:fulfilled",
+                                    move |vm, args| {
+                                        vm.settle_promise(
+                                            &aggregate_ok,
+                                            PromiseState::Fulfilled(
+                                                args.first()
+                                                    .cloned()
+                                                    .unwrap_or(JsValue::Undefined),
+                                            ),
+                                        );
+                                        Ok(JsValue::Undefined)
+                                    },
+                                );
+                                let aggregate_err = aggregate.clone();
+                                let on_rejected = JsValue::native(
+                                    "Promise.race:rejected",
+                                    move |vm, args| {
+                                        vm.settle_promise(
+                                            &aggregate_err,
+                                            PromiseState::Rejected(
+                                                args.first()
+                                                    .cloned()
+                                                    .unwrap_or(JsValue::Undefined),
+                                            ),
+                                        );
+                                        Ok(JsValue::Undefined)
+                                    },
+                                );
+                                source.borrow_mut().then_callbacks.push(PromiseReaction {
+                                    on_fulfilled: Some(on_fulfilled),
+                                    on_rejected: Some(on_rejected),
+                                    child: Rc::new(RefCell::new(JsPromise::pending())),
+                                });
+                            }
                         },
-                        other => {
-                            return Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                JsPromise::resolved(other.clone()),
-                            ))));
+                        value => {
+                            vm.settle_promise(
+                                &aggregate,
+                                PromiseState::Fulfilled(value),
+                            );
+                            break;
                         }
                     }
                 }
-                Ok(JsValue::Promise(Rc::new(RefCell::new(JsPromise::pending()))))
+                Ok(JsValue::Promise(aggregate))
             }),
         );
         self.globals.insert(
