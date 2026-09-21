@@ -85,7 +85,9 @@ pub enum Expr {
         name: Option<String>,
         params: Vec<String>,
         body: Vec<Stmt>,
+        is_async: bool,
     },
+    Await(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +124,7 @@ pub enum Stmt {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        is_async: bool,
     },
     ClassDecl {
         name: String,
