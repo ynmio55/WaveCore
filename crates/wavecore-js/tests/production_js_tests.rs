@@ -144,8 +144,12 @@ fn test_promises_and_chaining() {
         res;
     "#;
 
-    let res = execute_script(script).expect("Execution failed");
-    assert_eq!(res.to_number(), 42.0);
+    let mut vm = VM::new();
+    let res = wavecore_js::eval_script(script, &mut vm).expect("Execution failed");
+    // Promise handlers run as microtasks after the current script turn.
+    assert_eq!(res.to_number(), 0.0);
+    let observed = wavecore_js::eval_script("res;", &mut vm).expect("Execution failed");
+    assert_eq!(observed.to_number(), 42.0);
 }
 
 #[test]
@@ -243,7 +247,14 @@ fn test_web_apis_timers_and_fetch() {
     let chunks = wavecore_js::bytecode::Compiler::new().compile(&stmts).unwrap();
     let res = vm.execute(chunks).unwrap();
 
-    assert_eq!(res, JsValue::Boolean(true));
+    // The boolean expression is evaluated before Promise reactions run.
+    assert_eq!(res, JsValue::Boolean(false));
+    let observed = wavecore_js::eval_script(
+        r#"timerId > 0 && u.host == "example.com" && fetchResult == "WaveCoreRocks";"#,
+        &mut vm,
+    )
+    .unwrap();
+    assert_eq!(observed, JsValue::Boolean(true));
 }
 
 #[test]

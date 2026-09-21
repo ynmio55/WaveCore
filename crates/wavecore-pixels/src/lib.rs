@@ -20,6 +20,7 @@ pub struct Surface {
     pub height: u32,
     pub pixels: Vec<Rgba>,
     pub clip_stack: Vec<Rect>,
+    pub opacity_stack: Vec<f32>,
     pub damage_rects: Vec<Rect>,
     fonts: Vec<Arc<FontFace>>,
 }
@@ -49,14 +50,29 @@ impl Surface {
             height,
             pixels: vec![Rgba(255, 255, 255, 255); (width * height) as usize],
             clip_stack: Vec::new(),
+            opacity_stack: vec![1.0],
             damage_rects: Vec::new(),
             fonts,
+        }
+    }
+
+    pub fn blank_like(&self, width: u32, height: u32, color: Rgba) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![color; (width * height) as usize],
+            clip_stack: Vec::new(),
+            opacity_stack: vec![1.0],
+            damage_rects: Vec::new(),
+            fonts: self.fonts.clone(),
         }
     }
 
     pub fn clear(&mut self, color: Rgba) {
         self.pixels.fill(color);
         self.clip_stack.clear();
+        self.opacity_stack.clear();
+        self.opacity_stack.push(1.0);
         self.damage_rects.clear();
     }
 
@@ -75,6 +91,23 @@ impl Surface {
 
     pub fn pop_clip(&mut self) {
         self.clip_stack.pop();
+    }
+
+    pub fn push_opacity(&mut self, opacity: f32) {
+        let parent = self.opacity_stack.last().copied().unwrap_or(1.0);
+        self.opacity_stack.push((parent * opacity).clamp(0.0, 1.0));
+    }
+
+    pub fn pop_opacity(&mut self) {
+        if self.opacity_stack.len() > 1 {
+            self.opacity_stack.pop();
+        }
+    }
+
+    fn effective_color(&self, mut color: Rgba) -> Rgba {
+        let opacity = self.opacity_stack.last().copied().unwrap_or(1.0);
+        color.3 = (color.3 as f32 * opacity).round().clamp(0.0, 255.0) as u8;
+        color
     }
 
     pub fn mark_damage(&mut self, rect: Rect) {
@@ -162,12 +195,25 @@ impl Surface {
                     DisplayCommand::PopClip => {
                         self.pop_clip();
                     }
+                    DisplayCommand::PushOpacity(opacity) => self.push_opacity(*opacity),
+                    DisplayCommand::PopOpacity => self.pop_opacity(),
                     DisplayCommand::FillRect { rect, color } => {
-                        let col = parse_color(color).unwrap_or(Rgba(240, 240, 240, 255));
+                        let col = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
                         self.fill_rect(rect.x + offset_x, rect.y + offset_y, rect.width, rect.height, col);
                     }
-                    DisplayCommand::Border { rect, widths, color } => {
-                        let col = parse_color(color).unwrap_or(Rgba(0, 0, 0, 255));
+                    DisplayCommand::FillRoundedRect { rect, radius, color } => {
+                        let col = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
+                        self.fill_rounded_rect(
+                            rect.x + offset_x,
+                            rect.y + offset_y,
+                            rect.width,
+                            rect.height,
+                            *radius,
+                            col,
+                        );
+                    }
+                DisplayCommand::Border { rect, widths, color, radius: _ } => {
+                        let col = self.effective_color(parse_color(color).unwrap_or(Rgba(0, 0, 0, 255)));
                         let rx = rect.x + offset_x;
                         let ry = rect.y + offset_y;
                         self.fill_rect(rx, ry, rect.width, widths.top, col);
@@ -176,14 +222,14 @@ impl Surface {
                         self.fill_rect(rx + rect.width - widths.right, ry, widths.right, rect.height, col);
                     }
                     DisplayCommand::Text { text, rect, font_size, line_height, color } => {
-                        let col = parse_color(color).unwrap_or(Rgba(30, 30, 30, 255));
+                        let col = self.effective_color(parse_color(color).unwrap_or(Rgba(30, 30, 30, 255)));
                         self.draw_text(text, rect.x + offset_x, rect.y + offset_y, *font_size, *line_height, rect.width, col);
                     }
                     DisplayCommand::Image { rect, src } => {
                         self.draw_image(src, rect.x + offset_x, rect.y + offset_y, rect.width, rect.height);
                     }
                     DisplayCommand::DrawLine { x1, y1, x2, y2, color, width } => {
-                        let col = parse_color(color).unwrap_or(Rgba(0, 0, 0, 255));
+                        let col = self.effective_color(parse_color(color).unwrap_or(Rgba(0, 0, 0, 255)));
                         self.draw_line(x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y, col, *width);
                     }
                     DisplayCommand::DrawCircle { cx, cy, radius, fill, stroke } => {
@@ -212,12 +258,25 @@ impl Surface {
                 DisplayCommand::PopClip => {
                     self.pop_clip();
                 }
+                DisplayCommand::PushOpacity(opacity) => self.push_opacity(*opacity),
+                DisplayCommand::PopOpacity => self.pop_opacity(),
                 DisplayCommand::FillRect { rect, color } => {
-                    let c = parse_color(color).unwrap_or(Rgba(240, 240, 240, 255));
+                    let c = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
                     self.fill_rect(rect.x + offset_x, rect.y + offset_y, rect.width, rect.height, c);
                 }
-                DisplayCommand::Border { rect, widths, color } => {
-                    let c = parse_color(color).unwrap_or(Rgba(0, 0, 0, 255));
+                DisplayCommand::FillRoundedRect { rect, radius, color } => {
+                    let col = self.effective_color(parse_color(color).unwrap_or(Rgba(240, 240, 240, 255)));
+                    self.fill_rounded_rect(
+                        rect.x + offset_x,
+                        rect.y + offset_y,
+                        rect.width,
+                        rect.height,
+                        *radius,
+                        col,
+                    );
+                }
+                DisplayCommand::Border { rect, widths, color, radius: _ } => {
+                    let c = self.effective_color(parse_color(color).unwrap_or(Rgba(0, 0, 0, 255)));
                     let rx = rect.x + offset_x;
                     let ry = rect.y + offset_y;
                     self.fill_rect(rx, ry, rect.width, widths.top, c);
@@ -226,14 +285,14 @@ impl Surface {
                     self.fill_rect(rx + rect.width - widths.right, ry, widths.right, rect.height, c);
                 }
                 DisplayCommand::Text { text, rect, font_size, line_height, color } => {
-                    let c = parse_color(color).unwrap_or(Rgba(30, 30, 30, 255));
+                    let c = self.effective_color(parse_color(color).unwrap_or(Rgba(30, 30, 30, 255)));
                     self.draw_text(text, rect.x + offset_x, rect.y + offset_y, *font_size, *line_height, rect.width, c);
                 }
                 DisplayCommand::Image { rect, src } => {
                     self.draw_image(src, rect.x + offset_x, rect.y + offset_y, rect.width, rect.height);
                 }
                 DisplayCommand::DrawLine { x1, y1, x2, y2, color, width } => {
-                    let col = parse_color(color).unwrap_or(Rgba(0, 0, 0, 255));
+                    let col = self.effective_color(parse_color(color).unwrap_or(Rgba(0, 0, 0, 255)));
                     self.draw_line(x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y, col, *width);
                 }
                 DisplayCommand::DrawCircle { cx, cy, radius, fill, stroke } => {
@@ -357,12 +416,29 @@ impl Surface {
         }
         let idx = (y as u32 * self.width + x as u32) as usize;
         let bg = self.pixels[idx];
-        let a = (alpha_mask as u32 * color.3 as u32) / 255;
-        let inv_a = 255 - a;
-        let r = ((color.0 as u32 * a + bg.0 as u32 * inv_a) / 255) as u8;
-        let g = ((color.1 as u32 * a + bg.1 as u32 * inv_a) / 255) as u8;
-        let b = ((color.2 as u32 * a + bg.2 as u32 * inv_a) / 255) as u8;
-        self.pixels[idx] = Rgba(r, g, b, 255);
+
+        let src_a = (alpha_mask as f32 / 255.0) * (color.3 as f32 / 255.0);
+        let dst_a = bg.3 as f32 / 255.0;
+        let out_a = src_a + dst_a * (1.0 - src_a);
+        if out_a <= f32::EPSILON {
+            self.pixels[idx] = Rgba(0, 0, 0, 0);
+            return;
+        }
+
+        let blend = |src: u8, dst: u8| -> u8 {
+            let src = src as f32 / 255.0;
+            let dst = dst as f32 / 255.0;
+            (((src * src_a + dst * dst_a * (1.0 - src_a)) / out_a) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+
+        self.pixels[idx] = Rgba(
+            blend(color.0, bg.0),
+            blend(color.1, bg.1),
+            blend(color.2, bg.2),
+            (out_a * 255.0).round().clamp(0.0, 255.0) as u8,
+        );
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Rgba) {
@@ -391,6 +467,36 @@ impl Surface {
         for py in y0..y1 {
             for px in x0..x1 {
                 self.pixels[(py * self.width + px) as usize] = color;
+            }
+        }
+    }
+
+    pub fn fill_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgba) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let r = radius.max(0.0).min(w.min(h) * 0.5);
+        if r <= 0.5 {
+            self.fill_rect(x, y, w, h, color);
+            return;
+        }
+
+        let x0 = x.max(0.0) as i32;
+        let y0 = y.max(0.0) as i32;
+        let x1 = (x + w).min(self.width as f32).ceil() as i32;
+        let y1 = (y + h).min(self.height as f32).ceil() as i32;
+
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let fx = px as f32 + 0.5;
+                let fy = py as f32 + 0.5;
+                let cx = fx.clamp(x + r, x + w - r);
+                let cy = fy.clamp(y + r, y + h - r);
+                let dx = fx - cx;
+                let dy = fy - cy;
+                if dx * dx + dy * dy <= r * r {
+                    self.blend_pixel(px, py, color, color.3);
+                }
             }
         }
     }
@@ -532,6 +638,7 @@ fn parse_color(s: &str) -> Option<Rgba> {
 pub fn command_bounds(cmd: &DisplayCommand) -> Option<Rect> {
     match cmd {
         DisplayCommand::FillRect { rect, .. } => Some(*rect),
+        DisplayCommand::FillRoundedRect { rect, .. } => Some(*rect),
         DisplayCommand::Border { rect, .. } => Some(*rect),
         DisplayCommand::Text { rect, .. } => Some(*rect),
         DisplayCommand::Image { rect, .. } => Some(*rect),
@@ -547,7 +654,10 @@ pub fn command_bounds(cmd: &DisplayCommand) -> Option<Rect> {
             let r = radius + extra;
             Some(Rect { x: cx - r, y: cy - r, width: r * 2.0, height: r * 2.0 })
         }
-        DisplayCommand::PushClip(_) | DisplayCommand::PopClip => None,
+        DisplayCommand::PushClip(_)
+        | DisplayCommand::PopClip
+        | DisplayCommand::PushOpacity(_)
+        | DisplayCommand::PopOpacity => None,
     }
 }
 

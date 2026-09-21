@@ -9,3 +9,8 @@ description = "Pulse JavaScript Engine and DOM Bindings for WaveCore"
 wavecore-dom = { path = "../wavecore-dom" }
 wavecore-net = { path = "../wavecore-net" }
 wavecore-sandbox = { path = "../wavecore-sandbox" }
+wavecore-render = { path = "../wavecore-render" }
+
+serde_json = "1"
+
+regex = "1"

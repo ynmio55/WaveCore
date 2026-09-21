@@ -142,6 +142,7 @@ pub enum NetError {
     Network(String),
     Io(std::io::Error),
     InvalidUrl(String),
+    BlockedScheme(String),
     TooManyRedirects(usize),
     Cors(String),
     CertificateInvalid(String),
@@ -154,6 +155,7 @@ impl std::fmt::Display for NetError {
             NetError::Network(s) => write!(f, "Network error: {s}"),
             NetError::Io(e) => write!(f, "IO error: {e}"),
             NetError::InvalidUrl(s) => write!(f, "Invalid URL: {s}"),
+            NetError::BlockedScheme(s) => write!(f, "Blocked resource scheme: {s}"),
             NetError::TooManyRedirects(n) => write!(f, "Exceeded maximum redirect limit ({n})"),
             NetError::Cors(s) => write!(f, "{s}"),
             NetError::CertificateInvalid(s) => write!(f, "SSL/TLS certificate error: {s}"),
@@ -215,12 +217,131 @@ impl NetworkClient {
         self.fetch_with_origin(url_or_path, None)
     }
 
+    pub fn fetch_request_with_origin(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: &HashMap<String, String>,
+        body: Option<&[u8]>,
+        caller_origin: Option<&Origin>,
+    ) -> Result<HttpResponse, NetError> {
+        let method = method.trim().to_ascii_uppercase();
+        if method == "GET"
+            && body.is_none()
+            && (headers.is_empty() || url.trim().starts_with("data:"))
+        {
+            return self.fetch_with_origin(url, caller_origin);
+        }
+        if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS") {
+            return Err(NetError::Network(format!("unsupported HTTP method: {method}")));
+        }
+
+        let trimmed = url.trim();
+        if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+            if method == "GET" && headers.is_empty() && body.is_none() {
+                return self.fetch_with_origin(trimmed, caller_origin);
+            }
+            return Err(NetError::BlockedScheme(
+                trimmed.split(':').next().unwrap_or("unknown").to_ascii_lowercase(),
+            ));
+        }
+
+        let mut req = ureq::request(&method, trimmed)
+            .set("User-Agent", &self.user_agent)
+            .set("Accept", "*/*");
+
+        if let Some(origin) = caller_origin {
+            req = req.set("Origin", &origin.to_string_repr());
+        }
+        if let Some(cookie) = self.cookie_jar.cookie_header_for_url(trimmed) {
+            req = req.set("Cookie", &cookie);
+        }
+        for (name, value) in headers {
+            if !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "host" | "content-length" | "cookie" | "origin"
+            ) {
+                req = req.set(name, value);
+            }
+        }
+
+        let response = match body {
+            Some(bytes) => req.send_bytes(bytes),
+            None => req.call(),
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(_, response)) => response,
+            Err(error) => return Err(NetError::Network(error.to_string())),
+        };
+
+        let status_code = response.status();
+        let status_text = response.status_text().to_string();
+        let mut response_headers = HashMap::new();
+        for name in response.headers_names() {
+            if let Some(value) = response.header(&name) {
+                let lower = name.to_ascii_lowercase();
+                if lower == "set-cookie" {
+                    self.cookie_jar.process_set_cookie_header(value, trimmed);
+                }
+                response_headers.insert(lower, value.to_string());
+            }
+        }
+
+        if let Ok(target_origin) = Origin::parse(trimmed) {
+            CorsPolicy::check(caller_origin, &target_origin, &response_headers)
+                .map_err(NetError::Cors)?;
+        }
+
+        let content_type = response
+            .header("content-type")
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let mut reader = response
+            .into_reader()
+            .take(self.max_response_bytes.saturating_add(1) as u64);
+        let mut response_body = Vec::new();
+        reader.read_to_end(&mut response_body).map_err(NetError::Io)?;
+        if response_body.len() > self.max_response_bytes {
+            return Err(NetError::ResourceLimitExceeded {
+                limit_bytes: self.max_response_bytes,
+                actual_bytes: response_body.len(),
+            });
+        }
+
+        Ok(HttpResponse::new(
+            trimmed.to_string(),
+            status_code,
+            status_text,
+            response_headers,
+            response_body,
+            content_type,
+        ))
+    }
+
     pub fn fetch_with_origin(
         &mut self,
         url_or_path: &str,
         caller_origin: Option<&Origin>,
     ) -> Result<HttpResponse, NetError> {
         let trimmed = url_or_path.trim();
+
+        // Web-origin fetches are never allowed to escape the network sandbox into
+        // local filesystem or privileged URL schemes.
+        if caller_origin.is_some()
+            && !trimmed.starts_with("http://")
+            && !trimmed.starts_with("https://")
+            && !trimmed.starts_with("data:")
+        {
+            return Err(NetError::BlockedScheme(
+                trimmed
+                    .split(':')
+                    .next()
+                    .unwrap_or("local-file")
+                    .to_ascii_lowercase(),
+            ));
+        }
 
         // 1. Data URIs (RFC 2397)
         if trimmed.starts_with("data:") {
@@ -382,6 +503,20 @@ impl NetworkClient {
                             } else {
                                 loc.to_string()
                             };
+                            let parsed_next = Url::parse(&next_url)
+                                .map_err(|e| NetError::InvalidUrl(e.to_string()))?;
+                            if !matches!(parsed_next.scheme(), "http" | "https") {
+                                return Err(NetError::BlockedScheme(
+                                    parsed_next.scheme().to_string(),
+                                ));
+                            }
+                            let parsed_next = Url::parse(&next_url)
+                                .map_err(|e| NetError::InvalidUrl(e.to_string()))?;
+                            if !matches!(parsed_next.scheme(), "http" | "https") {
+                                return Err(NetError::BlockedScheme(
+                                    parsed_next.scheme().to_string(),
+                                ));
+                            }
                             current_url = next_url;
                             redirect_count += 1;
                             continue;
@@ -683,6 +818,24 @@ mod tests {
                 actual_bytes: 10
             }
         ));
+    }
+
+    #[test]
+    fn web_origin_fetch_cannot_read_local_files_or_privileged_schemes() {
+        let mut client = NetworkClient::new();
+        let origin = Origin::parse("https://app.example.com").unwrap();
+
+        let local = client.fetch_with_origin("file:///etc/passwd", Some(&origin));
+        assert!(matches!(local, Err(NetError::BlockedScheme(_))));
+
+        let relative = client.fetch_with_origin("../../secret.txt", Some(&origin));
+        assert!(matches!(relative, Err(NetError::BlockedScheme(_))));
+
+        let javascript = client.fetch_with_origin("javascript:alert(1)", Some(&origin));
+        assert!(matches!(javascript, Err(NetError::BlockedScheme(_))));
+
+        let data = client.fetch_with_origin("data:text/plain,ok", Some(&origin));
+        assert!(data.is_ok());
     }
 
 }

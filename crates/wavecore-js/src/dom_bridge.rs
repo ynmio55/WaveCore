@@ -6,16 +6,48 @@ use std::time::{Duration, Instant};
 use wavecore_dom::Node;
 use wavecore_net::NetworkClient;
 use wavecore_sandbox::Origin;
+use wavecore_render::{Canvas2DCommand, WebGlCommand};
 
 use crate::value::{JsObject, JsPromise, JsValue};
 use crate::vm::VM;
 
 static ELEMENT_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
+#[derive(Clone, Copy)]
+enum TimerKind {
+    Timeout,
+    Interval(Duration),
+    AnimationFrame,
+}
+
 #[derive(Clone)]
 struct TimerEntry {
     due: Instant,
     callback: JsValue,
+    kind: TimerKind,
+}
+
+#[derive(Clone, Copy)]
+enum CanvasPathPrimitive {
+    Line { x1: f32, y1: f32, x2: f32, y2: f32 },
+    Circle { cx: f32, cy: f32, radius: f32 },
+}
+
+#[derive(Default)]
+struct CanvasPathState {
+    primitives: Vec<CanvasPathPrimitive>,
+    current: Option<(f32, f32)>,
+    first: Option<(f32, f32)>,
+}
+
+#[derive(Clone)]
+struct MutationObserverRegistration {
+    callback: JsValue,
+    target_id: Option<String>,
+    subtree: bool,
+    attributes: bool,
+    child_list: bool,
+    character_data: bool,
 }
 
 pub struct DomBridge {
@@ -24,7 +56,11 @@ pub struct DomBridge {
     pub current_url: Rc<RefCell<String>>,
     pub history_stack: Rc<RefCell<Vec<String>>>,
     timer_callbacks: Rc<RefCell<HashMap<usize, TimerEntry>>>,
+    time_origin: Rc<Instant>,
     network_client: Rc<RefCell<NetworkClient>>,
+    canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
+    webgl_commands: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
+    mutation_observers: Rc<RefCell<HashMap<usize, MutationObserverRegistration>>>,
 }
 
 impl DomBridge {
@@ -35,7 +71,11 @@ impl DomBridge {
             current_url: Rc::new(RefCell::new("https://wavecore.local/".to_string())),
             history_stack: Rc::new(RefCell::new(vec!["https://wavecore.local/".to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
+            time_origin: Rc::new(Instant::now()),
             network_client: Rc::new(RefCell::new(NetworkClient::new())),
+            canvas_commands: Rc::new(RefCell::new(HashMap::new())),
+            webgl_commands: Rc::new(RefCell::new(HashMap::new())),
+            mutation_observers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -54,11 +94,26 @@ impl DomBridge {
             current_url: Rc::new(RefCell::new(url.to_string())),
             history_stack: Rc::new(RefCell::new(vec![url.to_string()])),
             timer_callbacks: Rc::new(RefCell::new(HashMap::new())),
+            time_origin: Rc::new(Instant::now()),
             network_client,
+            canvas_commands: Rc::new(RefCell::new(HashMap::new())),
+            webgl_commands: Rc::new(RefCell::new(HashMap::new())),
+            mutation_observers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
+    pub fn canvas_commands_snapshot(&self) -> HashMap<u64, Vec<Canvas2DCommand>> {
+        self.canvas_commands.borrow().clone()
+    }
+
+    pub fn webgl_commands_snapshot(&self) -> HashMap<u64, Vec<WebGlCommand>> {
+        self.webgl_commands.borrow().clone()
+    }
+
     pub fn attach_to_vm(&self, vm: &mut VM) {
+        let canvas_commands_ref = self.canvas_commands.clone();
+        let webgl_commands_ref = self.webgl_commands.clone();
+        let mutation_observers_ref = self.mutation_observers.clone();
         let root_ref = self.root.clone();
         let listeners_ref = self.listeners.clone();
         let url_ref = self.current_url.clone();
@@ -70,13 +125,16 @@ impl DomBridge {
         // document.getElementById(id)
         let r1 = root_ref.clone();
         let l1 = listeners_ref.clone();
+        let c1 = canvas_commands_ref.clone();
+        let w1 = webgl_commands_ref.clone();
+        let m1 = mutation_observers_ref.clone();
         document.set(
             "getElementById",
             JsValue::native("getElementById", move |_vm, args| {
                 let id = args.first().map(|a| a.to_js_string()).unwrap_or_default();
                 let borrowed = r1.borrow();
                 if let Some(_node) = borrowed.find_by_id(&id) {
-                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone());
+                    let elem = create_element_wrapper(&id, r1.clone(), l1.clone(), c1.clone(), w1.clone(), m1.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -87,6 +145,9 @@ impl DomBridge {
         // document.querySelector(selector)
         let r2 = root_ref.clone();
         let l2 = listeners_ref.clone();
+        let c2 = canvas_commands_ref.clone();
+        let w2 = webgl_commands_ref.clone();
+        let m2 = mutation_observers_ref.clone();
         document.set(
             "querySelector",
             JsValue::native("querySelector", move |_vm, args| {
@@ -104,7 +165,7 @@ impl DomBridge {
                     } else {
                         "".to_string()
                     };
-                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone());
+                    let elem = create_element_wrapper(&id, r2.clone(), l2.clone(), c2.clone(), w2.clone(), m2.clone());
                     Ok(elem)
                 } else {
                     Ok(JsValue::Null)
@@ -115,6 +176,9 @@ impl DomBridge {
         // document.querySelectorAll(selector)
         let r_all = root_ref.clone();
         let l_all = listeners_ref.clone();
+        let c_all = canvas_commands_ref.clone();
+        let w_all = webgl_commands_ref.clone();
+        let m_all = mutation_observers_ref.clone();
         document.set(
             "querySelectorAll",
             JsValue::native("querySelectorAll", move |_vm, args| {
@@ -146,6 +210,9 @@ impl DomBridge {
                         &html_id,
                         r_all.clone(),
                         l_all.clone(),
+                        c_all.clone(),
+                        w_all.clone(),
+                        m_all.clone(),
                     ));
                 }
 
@@ -156,6 +223,9 @@ impl DomBridge {
         // document.createElement(tagName)
         let r_create = root_ref.clone();
         let l_create = listeners_ref.clone();
+        let c_create = canvas_commands_ref.clone();
+        let w_create = webgl_commands_ref.clone();
+        let m_create = mutation_observers_ref.clone();
         document.set(
             "createElement",
             JsValue::native("createElement", move |_vm, args| {
@@ -168,7 +238,7 @@ impl DomBridge {
                 // Store in root children temporarily as detached node
                 r_create.borrow_mut().append_child(new_node);
 
-                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone());
+                let elem = create_element_wrapper(&gen_id, r_create.clone(), l_create.clone(), c_create.clone(), w_create.clone(), m_create.clone());
                 Ok(elem)
             }),
         );
@@ -194,6 +264,31 @@ impl DomBridge {
         window.set("document", doc_val);
         window.set("location", location_val);
         window.set("history", history_val);
+
+        // High-resolution monotonic timing API.
+        let perf_origin = self.time_origin.clone();
+        let mut performance = JsObject::new();
+        performance.set(
+            "now",
+            JsValue::native("now", move |_vm, _args| {
+                Ok(JsValue::Number(perf_origin.elapsed().as_secs_f64() * 1000.0))
+            }),
+        );
+        let performance_val = JsValue::Object(Rc::new(RefCell::new(performance)));
+        window.set("performance", performance_val.clone());
+        vm.set_global("performance", performance_val);
+
+        // queueMicrotask(callback) schedules work after the current JS turn.
+        let queue_microtask = JsValue::native("queueMicrotask", move |vm, args| {
+            if let Some(callback) = args.first().cloned() {
+                vm.queue_microtask(move |vm| {
+                    vm.call_function(&callback, &[]).map(|_| ())
+                });
+            }
+            Ok(JsValue::Undefined)
+        });
+        window.set("queueMicrotask", queue_microtask.clone());
+        vm.set_global("queueMicrotask", queue_microtask);
 
         // window.alert
         window.set(
@@ -228,6 +323,7 @@ impl DomBridge {
                     TimerEntry {
                         due: Instant::now() + Duration::from_millis(delay_ms),
                         callback: cb,
+                        kind: TimerKind::Timeout,
                     },
                 );
                 Ok(JsValue::Number(id as f64))
@@ -247,9 +343,376 @@ impl DomBridge {
         window.set("clearTimeout", clear_timeout_fn.clone());
         vm.set_global("clearTimeout", clear_timeout_fn);
 
+        let interval_timers = self.timer_callbacks.clone();
+        let set_interval_fn = JsValue::native("setInterval", move |_vm, args| {
+            if let Some(cb) = args.first().cloned() {
+                let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                let delay_ms = args
+                    .get(1)
+                    .map(|v| v.to_number().max(1.0))
+                    .unwrap_or(1.0)
+                    .min(86_400_000.0) as u64;
+                let period = Duration::from_millis(delay_ms);
+                interval_timers.borrow_mut().insert(
+                    id,
+                    TimerEntry {
+                        due: Instant::now() + period,
+                        callback: cb,
+                        kind: TimerKind::Interval(period),
+                    },
+                );
+                Ok(JsValue::Number(id as f64))
+            } else {
+                Ok(JsValue::Number(0.0))
+            }
+        });
+        window.set("setInterval", set_interval_fn.clone());
+        vm.set_global("setInterval", set_interval_fn);
+
+        let interval_clear = self.timer_callbacks.clone();
+        let clear_interval_fn = JsValue::native("clearInterval", move |_vm, args| {
+            let id = args.first().map(|a| a.to_number() as usize).unwrap_or(0);
+            interval_clear.borrow_mut().remove(&id);
+            Ok(JsValue::Undefined)
+        });
+        window.set("clearInterval", clear_interval_fn.clone());
+        vm.set_global("clearInterval", clear_interval_fn);
+
+        // requestAnimationFrame / cancelAnimationFrame. The browser event loop batches
+        // callbacks on a ~60 Hz cadence; the callback receives a monotonic timestamp.
+        let raf_timers = self.timer_callbacks.clone();
+        let request_animation_frame = JsValue::native("requestAnimationFrame", move |_vm, args| {
+            if let Some(cb) = args.first().cloned() {
+                let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                raf_timers.borrow_mut().insert(
+                    id,
+                    TimerEntry {
+                        due: Instant::now() + Duration::from_millis(16),
+                        callback: cb,
+                        kind: TimerKind::AnimationFrame,
+                    },
+                );
+                Ok(JsValue::Number(id as f64))
+            } else {
+                Ok(JsValue::Number(0.0))
+            }
+        });
+        window.set("requestAnimationFrame", request_animation_frame.clone());
+        vm.set_global("requestAnimationFrame", request_animation_frame);
+
+        let cancel_raf_timers = self.timer_callbacks.clone();
+        let cancel_animation_frame = JsValue::native("cancelAnimationFrame", move |_vm, args| {
+            let id = args.first().map(|a| a.to_number() as usize).unwrap_or(0);
+            cancel_raf_timers.borrow_mut().remove(&id);
+            Ok(JsValue::Undefined)
+        });
+        window.set("cancelAnimationFrame", cancel_animation_frame.clone());
+        vm.set_global("cancelAnimationFrame", cancel_animation_frame);
+
         vm.set_global("window", JsValue::Object(Rc::new(RefCell::new(window))));
 
-        // 5. URL API constructor
+        // 5. MutationObserver with microtask-delivered mutation records.
+        let observer_registry = mutation_observers_ref.clone();
+        vm.set_global(
+            "MutationObserver",
+            JsValue::native("MutationObserver", move |_vm, args| {
+                let callback = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| "TypeError: MutationObserver requires a callback".to_string())?;
+                if !matches!(callback, JsValue::Function(_) | JsValue::NativeFunction(_, _)) {
+                    return Err("TypeError: MutationObserver callback must be callable".to_string());
+                }
+
+                let observer_id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+                observer_registry.borrow_mut().insert(
+                    observer_id,
+                    MutationObserverRegistration {
+                        callback,
+                        target_id: None,
+                        subtree: false,
+                        attributes: false,
+                        child_list: false,
+                        character_data: false,
+                    },
+                );
+
+                let mut observer = JsObject::new();
+                observer.set("_observerId", JsValue::Number(observer_id as f64));
+
+                let observe_registry = observer_registry.clone();
+                observer.set(
+                    "observe",
+                    JsValue::native("observe", move |_vm, args| {
+                        let target_id = match args.first() {
+                            Some(JsValue::Object(target)) => target.borrow().get("id").to_js_string(),
+                            _ => String::new(),
+                        };
+                        if target_id.is_empty() {
+                            return Err("TypeError: MutationObserver.observe requires an Element target".to_string());
+                        }
+                        let options = args.get(1).and_then(|value| match value {
+                            JsValue::Object(options) => Some(options.clone()),
+                            _ => None,
+                        });
+                        let subtree = options
+                            .as_ref()
+                            .map(|o| o.borrow().get("subtree").is_truthy())
+                            .unwrap_or(false);
+                        let attributes = options
+                            .as_ref()
+                            .map(|o| o.borrow().get("attributes").is_truthy())
+                            .unwrap_or(false);
+                        let child_list = options
+                            .as_ref()
+                            .map(|o| o.borrow().get("childList").is_truthy())
+                            .unwrap_or(false);
+                        let character_data = options
+                            .as_ref()
+                            .map(|o| o.borrow().get("characterData").is_truthy())
+                            .unwrap_or(false);
+                        if !attributes && !child_list && !character_data {
+                            return Err(
+                                "TypeError: MutationObserver options must enable at least one mutation type"
+                                    .to_string(),
+                            );
+                        }
+                        if let Some(registration) = observe_registry.borrow_mut().get_mut(&observer_id) {
+                            registration.target_id = Some(target_id);
+                            registration.subtree = subtree;
+                            registration.attributes = attributes;
+                            registration.child_list = child_list;
+                            registration.character_data = character_data;
+                        }
+                        Ok(JsValue::Undefined)
+                    }),
+                );
+
+                let disconnect_registry = observer_registry.clone();
+                observer.set(
+                    "disconnect",
+                    JsValue::native("disconnect", move |_vm, _args| {
+                        if let Some(registration) = disconnect_registry.borrow_mut().get_mut(&observer_id) {
+                            registration.target_id = None;
+                        }
+                        Ok(JsValue::Undefined)
+                    }),
+                );
+
+                observer.set(
+                    "takeRecords",
+                    JsValue::native("takeRecords", |_vm, _args| {
+                        Ok(JsValue::new_array(Vec::new()))
+                    }),
+                );
+
+                Ok(JsValue::Object(Rc::new(RefCell::new(observer))))
+            }),
+        );
+
+        // 6. Event / CustomEvent constructors.
+        let make_event = |args: &[JsValue], custom: bool| -> Result<JsValue, String> {
+            let event_type = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+            let options = args.get(1).and_then(|value| match value {
+                JsValue::Object(obj) => Some(obj.clone()),
+                _ => None,
+            });
+            let bubbles = options
+                .as_ref()
+                .map(|obj| obj.borrow().get("bubbles").is_truthy())
+                .unwrap_or(false);
+            let cancelable = options
+                .as_ref()
+                .map(|obj| obj.borrow().get("cancelable").is_truthy())
+                .unwrap_or(false);
+            let detail = if custom {
+                options
+                    .as_ref()
+                    .map(|obj| obj.borrow().get("detail"))
+                    .unwrap_or(JsValue::Null)
+            } else {
+                JsValue::Undefined
+            };
+
+            let prevented = Rc::new(Cell::new(false));
+            let mut event = JsObject::new();
+            event.set("type", JsValue::String(event_type));
+            event.set("bubbles", JsValue::Boolean(bubbles));
+            event.set("cancelable", JsValue::Boolean(cancelable));
+            event.set("defaultPrevented", JsValue::Boolean(false));
+            if custom {
+                event.set("detail", detail);
+            }
+            let prevented_for_default = prevented.clone();
+            event.set(
+                "preventDefault",
+                JsValue::native("preventDefault", move |_vm, _args| {
+                    if cancelable {
+                        prevented_for_default.set(true);
+                    }
+                    Ok(JsValue::Undefined)
+                }),
+            );
+            let prevented_for_query = prevented.clone();
+            event.set(
+                "_isDefaultPrevented",
+                JsValue::native("_isDefaultPrevented", move |_vm, _args| {
+                    Ok(JsValue::Boolean(prevented_for_query.get()))
+                }),
+            );
+            Ok(JsValue::Object(Rc::new(RefCell::new(event))))
+        };
+
+        vm.set_global(
+            "Event",
+            JsValue::native("Event", move |_vm, args| make_event(args, false)),
+        );
+
+        vm.set_global(
+            "CustomEvent",
+            JsValue::native("CustomEvent", move |_vm, args| {
+                let event_type = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                let options = args.get(1).and_then(|value| match value {
+                    JsValue::Object(obj) => Some(obj.clone()),
+                    _ => None,
+                });
+                let bubbles = options
+                    .as_ref()
+                    .map(|obj| obj.borrow().get("bubbles").is_truthy())
+                    .unwrap_or(false);
+                let cancelable = options
+                    .as_ref()
+                    .map(|obj| obj.borrow().get("cancelable").is_truthy())
+                    .unwrap_or(false);
+                let detail = options
+                    .as_ref()
+                    .map(|obj| obj.borrow().get("detail"))
+                    .unwrap_or(JsValue::Null);
+
+                let prevented = Rc::new(Cell::new(false));
+                let mut event = JsObject::new();
+                event.set("type", JsValue::String(event_type));
+                event.set("bubbles", JsValue::Boolean(bubbles));
+                event.set("cancelable", JsValue::Boolean(cancelable));
+                event.set("defaultPrevented", JsValue::Boolean(false));
+                event.set("detail", detail);
+                let prevented_for_default = prevented.clone();
+                event.set(
+                    "preventDefault",
+                    JsValue::native("preventDefault", move |_vm, _args| {
+                        if cancelable {
+                            prevented_for_default.set(true);
+                        }
+                        Ok(JsValue::Undefined)
+                    }),
+                );
+                let prevented_for_query = prevented.clone();
+                event.set(
+                    "_isDefaultPrevented",
+                    JsValue::native("_isDefaultPrevented", move |_vm, _args| {
+                        Ok(JsValue::Boolean(prevented_for_query.get()))
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(event))))
+            }),
+        );
+
+        // 6. Fetch data-model primitives.
+        vm.set_global(
+            "Headers",
+            JsValue::native("Headers", |_vm, args| {
+                Ok(create_headers_value(headers_from_init(args.first())))
+            }),
+        );
+
+        vm.set_global(
+            "Request",
+            JsValue::native("Request", |_vm, args| {
+                let input = args.first().cloned().unwrap_or(JsValue::String(String::new()));
+                let mut url = match &input {
+                    JsValue::Object(obj) => obj.borrow().get("url").to_js_string(),
+                    other => other.to_js_string(),
+                };
+                let mut method = "GET".to_string();
+                let mut body = JsValue::Null;
+                let mut headers = create_headers_value(HashMap::new());
+
+                if let JsValue::Object(input_obj) = &input {
+                    let existing_method = input_obj.borrow().get("method");
+                    if !matches!(existing_method, JsValue::Undefined) {
+                        method = existing_method.to_js_string();
+                    }
+                    let existing_body = input_obj.borrow().get("body");
+                    if !matches!(existing_body, JsValue::Undefined) {
+                        body = existing_body;
+                    }
+                    let existing_headers = input_obj.borrow().get("headers");
+                    if !matches!(existing_headers, JsValue::Undefined) {
+                        headers = existing_headers;
+                    }
+                }
+
+                if let Some(JsValue::Object(options)) = args.get(1) {
+                    let option_method = options.borrow().get("method");
+                    if !matches!(option_method, JsValue::Undefined) {
+                        method = option_method.to_js_string().to_ascii_uppercase();
+                    }
+                    let option_body = options.borrow().get("body");
+                    if !matches!(option_body, JsValue::Undefined) {
+                        body = option_body;
+                    }
+                    let option_headers = options.borrow().get("headers");
+                    if !matches!(option_headers, JsValue::Undefined) {
+                        headers = create_headers_value(headers_from_init(Some(&option_headers)));
+                    }
+                    let option_url = options.borrow().get("url");
+                    if !matches!(option_url, JsValue::Undefined) {
+                        url = option_url.to_js_string();
+                    }
+                }
+
+                let mut request = JsObject::new();
+                request.set("url", JsValue::String(url));
+                request.set("method", JsValue::String(method.to_ascii_uppercase()));
+                request.set("body", body);
+                request.set("headers", headers);
+                Ok(JsValue::Object(Rc::new(RefCell::new(request))))
+            }),
+        );
+
+        vm.set_global(
+            "Response",
+            JsValue::native("Response", |_vm, args| {
+                let body = args
+                    .first()
+                    .map(|v| v.to_js_string().into_bytes())
+                    .unwrap_or_default();
+                let mut status = 200u16;
+                let mut status_text = String::new();
+                let mut headers = HashMap::new();
+                if let Some(JsValue::Object(options)) = args.get(1) {
+                    let raw_status = options.borrow().get("status").to_number();
+                    if raw_status.is_finite() && (100.0..=599.0).contains(&raw_status) {
+                        status = raw_status as u16;
+                    }
+                    let raw_status_text = options.borrow().get("statusText");
+                    if !matches!(raw_status_text, JsValue::Undefined) {
+                        status_text = raw_status_text.to_js_string();
+                    }
+                    let raw_headers = options.borrow().get("headers");
+                    headers = headers_from_init(Some(&raw_headers));
+                }
+                Ok(create_response_value(
+                    body,
+                    status,
+                    status_text,
+                    String::new(),
+                    headers,
+                ))
+            }),
+        );
+
+        // 7. URL API constructor
         vm.set_global(
             "URL",
             JsValue::native("URL", |_vm, args| {
@@ -273,43 +736,64 @@ impl DomBridge {
         vm.set_global(
             "fetch",
             JsValue::native("fetch", move |_vm, args| {
-                let url = args.first().map(|a| a.to_js_string()).unwrap_or_default();
+                let mut url = String::new();
+                let mut method = "GET".to_string();
+                let mut request_headers = HashMap::new();
+                let mut body: Option<Vec<u8>> = None;
+
+                match args.first() {
+                    Some(JsValue::Object(request)) => {
+                        url = request.borrow().get("url").to_js_string();
+                        let request_method = request.borrow().get("method");
+                        if !matches!(request_method, JsValue::Undefined) {
+                            method = request_method.to_js_string().to_ascii_uppercase();
+                        }
+                        let headers = request.borrow().get("headers");
+                        request_headers = headers_from_init(Some(&headers));
+                        let request_body = request.borrow().get("body");
+                        if !matches!(request_body, JsValue::Undefined | JsValue::Null) {
+                            body = Some(request_body.to_js_string().into_bytes());
+                        }
+                    }
+                    Some(other) => {
+                        url = other.to_js_string();
+                    }
+                    None => {}
+                }
+
+                if let Some(JsValue::Object(options)) = args.get(1) {
+                    let option_method = options.borrow().get("method");
+                    if !matches!(option_method, JsValue::Undefined) {
+                        method = option_method.to_js_string().to_ascii_uppercase();
+                    }
+
+                    let option_headers = options.borrow().get("headers");
+                    if !matches!(option_headers, JsValue::Undefined) {
+                        request_headers = headers_from_init(Some(&option_headers));
+                    }
+
+                    let option_body = options.borrow().get("body");
+                    if !matches!(option_body, JsValue::Undefined | JsValue::Null) {
+                        body = Some(option_body.to_js_string().into_bytes());
+                    }
+                }
+
                 let caller_origin = Origin::parse(&fetch_origin_url.borrow()).ok();
-                match fetch_client
-                    .borrow_mut()
-                    .fetch_with_origin(&url, caller_origin.as_ref())
-                {
+                match fetch_client.borrow_mut().fetch_request_with_origin(
+                    &method,
+                    &url,
+                    &request_headers,
+                    body.as_deref(),
+                    caller_origin.as_ref(),
+                ) {
                     Ok(res) => {
-                        let mut resp_obj = JsObject::new();
-                        resp_obj.set("status", JsValue::Number(res.status_code as f64));
-                        resp_obj.set("statusText", JsValue::String(res.status_text.clone()));
-                        resp_obj.set("ok", JsValue::Boolean(res.is_ok()));
-                        resp_obj.set("url", JsValue::String(res.url.clone()));
-                        resp_obj.set("contentType", JsValue::String(res.content_type.clone()));
-
-                        let body_text = res.content.clone();
-                        resp_obj.set(
-                            "text",
-                            JsValue::native("text", move |_vm, _args| {
-                                Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::resolved(JsValue::String(body_text.clone())),
-                                ))))
-                            }),
+                        let response_val = create_response_value(
+                            res.body,
+                            res.status_code,
+                            res.status_text,
+                            res.url,
+                            res.headers,
                         );
-
-                        let body_json = res.content;
-                        resp_obj.set(
-                            "json",
-                            JsValue::native("json", move |_vm, _args| {
-                                // Pulse does not yet expose a full JSON parser object model;
-                                // keep the response asynchronous and return the raw JSON text.
-                                Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                    JsPromise::resolved(JsValue::String(body_json.clone())),
-                                ))))
-                            }),
-                        );
-
-                        let response_val = JsValue::Object(Rc::new(RefCell::new(resp_obj)));
                         Ok(JsValue::Promise(Rc::new(RefCell::new(
                             JsPromise::resolved(response_val),
                         ))))
@@ -339,14 +823,36 @@ impl DomBridge {
             let mut timers = self.timer_callbacks.borrow_mut();
             for id in due_ids {
                 if let Some(entry) = timers.remove(&id) {
-                    callbacks.push(entry.callback);
+                    callbacks.push((id, entry));
                 }
             }
         }
 
         let count = callbacks.len();
-        for cb in callbacks {
-            let _ = vm.call_function(&cb, &[]);
+        let timestamp_ms = self.time_origin.elapsed().as_secs_f64() * 1000.0;
+        for (id, entry) in callbacks {
+            match entry.kind {
+                TimerKind::Timeout => {
+                    let _ = vm.call_function(&entry.callback, &[]);
+                }
+                TimerKind::Interval(period) => {
+                    let _ = vm.call_function(&entry.callback, &[]);
+                    self.timer_callbacks.borrow_mut().insert(
+                        id,
+                        TimerEntry {
+                            due: Instant::now() + period,
+                            callback: entry.callback,
+                            kind: TimerKind::Interval(period),
+                        },
+                    );
+                }
+                TimerKind::AnimationFrame => {
+                    let _ = vm.call_function(
+                        &entry.callback,
+                        &[JsValue::Number(timestamp_ms)],
+                    );
+                }
+            }
         }
         count
     }
@@ -422,6 +928,182 @@ impl DomBridge {
 
         default_prevented.get()
     }
+}
+
+fn create_headers_value(initial: HashMap<String, String>) -> JsValue {
+    let entries = Rc::new(RefCell::new(JsObject::new()));
+    for (name, value) in initial {
+        entries
+            .borrow_mut()
+            .set(name.to_ascii_lowercase(), JsValue::String(value));
+    }
+
+    let mut headers = JsObject::new();
+    headers.set("_entries", JsValue::Object(entries.clone()));
+
+    let get_entries = entries.clone();
+    headers.set(
+        "get",
+        JsValue::native("get", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            let value = get_entries.borrow().get(&name);
+            Ok(match value {
+                JsValue::Undefined => JsValue::Null,
+                other => other,
+            })
+        }),
+    );
+
+    let has_entries = entries.clone();
+    headers.set(
+        "has",
+        JsValue::native("has", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            Ok(JsValue::Boolean(
+                has_entries.borrow().properties.contains_key(&name),
+            ))
+        }),
+    );
+
+    let set_entries = entries.clone();
+    headers.set(
+        "set",
+        JsValue::native("set", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            let value = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+            if !name.is_empty() {
+                set_entries.borrow_mut().set(name, JsValue::String(value));
+            }
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let append_entries = entries.clone();
+    headers.set(
+        "append",
+        JsValue::native("append", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            let value = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+            if !name.is_empty() {
+                let previous = append_entries.borrow().get(&name);
+                let combined = match previous {
+                    JsValue::String(existing) if !existing.is_empty() => {
+                        format!("{existing}, {value}")
+                    }
+                    _ => value,
+                };
+                append_entries
+                    .borrow_mut()
+                    .set(name, JsValue::String(combined));
+            }
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let delete_entries = entries.clone();
+    headers.set(
+        "delete",
+        JsValue::native("delete", move |_vm, args| {
+            let name = args
+                .first()
+                .map(|v| v.to_js_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            delete_entries.borrow_mut().properties.remove(&name);
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    JsValue::Object(Rc::new(RefCell::new(headers)))
+}
+
+fn headers_from_init(value: Option<&JsValue>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(JsValue::Object(obj)) = value {
+        let entries = obj.borrow().get("_entries");
+        if let JsValue::Object(entries) = entries {
+            for (name, value) in &entries.borrow().properties {
+                out.insert(name.to_ascii_lowercase(), value.to_js_string());
+            }
+        } else {
+            for (name, value) in &obj.borrow().properties {
+                if !name.starts_with('_') {
+                    out.insert(name.to_ascii_lowercase(), value.to_js_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn create_response_value(
+    body: Vec<u8>,
+    status: u16,
+    status_text: String,
+    url: String,
+    headers: HashMap<String, String>,
+) -> JsValue {
+    let text = String::from_utf8_lossy(&body).to_string();
+    let mut response = JsObject::new();
+    response.set("status", JsValue::Number(status as f64));
+    response.set("statusText", JsValue::String(status_text));
+    response.set("ok", JsValue::Boolean((200..=299).contains(&status)));
+    response.set("url", JsValue::String(url));
+    response.set("headers", create_headers_value(headers));
+
+    let text_body = text.clone();
+    response.set(
+        "text",
+        JsValue::native("text", move |_vm, _args| {
+            Ok(JsValue::Promise(Rc::new(RefCell::new(
+                JsPromise::resolved(JsValue::String(text_body.clone())),
+            ))))
+        }),
+    );
+
+    let json_body = text;
+    response.set(
+        "json",
+        JsValue::native("json", move |vm, _args| {
+            let json_global = vm
+                .get_global("JSON")
+                .cloned()
+                .ok_or_else(|| "JSON global is unavailable".to_string())?;
+            let JsValue::Object(json_obj) = json_global else {
+                return Err("JSON global is invalid".to_string());
+            };
+            let parse = json_obj.borrow().get("parse");
+            let parsed = vm.call_function(&parse, &[JsValue::String(json_body.clone())])?;
+            Ok(JsValue::Promise(Rc::new(RefCell::new(
+                JsPromise::resolved(parsed),
+            ))))
+        }),
+    );
+
+    let bytes = body;
+    response.set(
+        "arrayBuffer",
+        JsValue::native("arrayBuffer", move |_vm, _args| {
+            Ok(JsValue::Promise(Rc::new(RefCell::new(
+                JsPromise::resolved(JsValue::ArrayBuffer(Rc::new(RefCell::new(
+                    bytes.clone(),
+                )))),
+            ))))
+        }),
+    );
+
+    JsValue::Object(Rc::new(RefCell::new(response)))
 }
 
 fn parse_url_parts(url: &str) -> (String, String, String, String, String) {
@@ -522,10 +1204,91 @@ fn create_history_object(history_stack: Rc<RefCell<Vec<String>>>) -> JsObject {
     hist
 }
 
+fn queue_mutation_observers(
+    vm: &mut VM,
+    root: &Rc<RefCell<Node>>,
+    observers: &Rc<RefCell<HashMap<usize, MutationObserverRegistration>>>,
+    target_id: &str,
+    mutation_type: &str,
+    attribute_name: Option<&str>,
+) {
+    let registrations = observers
+        .borrow()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let ancestor_ids = {
+        let root = root.borrow();
+        root.find_by_id(target_id)
+            .and_then(|target| root.ancestor_ids_for(target.node_id()))
+            .unwrap_or_default()
+    };
+
+    for registration in registrations {
+        let Some(observed_id) = registration.target_id.clone() else {
+            continue;
+        };
+
+        let type_enabled = match mutation_type {
+            "attributes" => registration.attributes,
+            "childList" => registration.child_list,
+            "characterData" => registration.character_data,
+            _ => false,
+        };
+        if !type_enabled {
+            continue;
+        }
+
+        let matches_target = if observed_id == target_id {
+            true
+        } else if registration.subtree {
+            let root = root.borrow();
+            root.find_by_id(&observed_id)
+                .map(|node| ancestor_ids.contains(&node.node_id()))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !matches_target {
+            continue;
+        }
+
+        let callback = registration.callback.clone();
+        let target = target_id.to_string();
+        let kind = mutation_type.to_string();
+        let attribute = attribute_name.map(str::to_string);
+        vm.queue_microtask(move |vm| {
+            let mut record = JsObject::new();
+            record.set("type", JsValue::String(kind.clone()));
+            record.set("targetId", JsValue::String(target.clone()));
+            if let Some(attribute) = &attribute {
+                record.set("attributeName", JsValue::String(attribute.clone()));
+            } else {
+                record.set("attributeName", JsValue::Null);
+            }
+            let records = JsValue::new_array(vec![JsValue::Object(Rc::new(RefCell::new(record)))]);
+            let _ = vm.call_function(&callback, &[records, JsValue::Undefined])?;
+            Ok(())
+        });
+    }
+}
+
+fn same_js_callback(a: &JsValue, b: &JsValue) -> bool {
+    match (a, b) {
+        (JsValue::Function(a), JsValue::Function(b)) => Rc::ptr_eq(a, b),
+        (JsValue::NativeFunction(_, a), JsValue::NativeFunction(_, b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
 fn create_element_wrapper(
     id: &str,
     root: Rc<RefCell<Node>>,
     listeners: Rc<RefCell<HashMap<(String, String), Vec<JsValue>>>>,
+    canvas_commands: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
+    webgl_commands: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
+    mutation_observers: Rc<RefCell<HashMap<usize, MutationObserverRegistration>>>,
 ) -> JsValue {
     let mut elem_obj = JsObject::new();
     let elem_id = id.to_string();
@@ -564,13 +1327,29 @@ fn create_element_wrapper(
 
     let r_set = root.clone();
     let id_set = elem_id.clone();
+    let observers_set_text = mutation_observers.clone();
     elem_obj.set(
         "setInnerText",
-        JsValue::native("setInnerText", move |_vm, args| {
+        JsValue::native("setInnerText", move |vm, args| {
             let text = args.first().map(|a| a.to_js_string()).unwrap_or_default();
-            let mut borrowed = r_set.borrow_mut();
-            if let Some(node) = borrowed.find_by_id_mut(&id_set) {
-                node.set_inner_text(&text);
+            let changed = {
+                let mut borrowed = r_set.borrow_mut();
+                if let Some(node) = borrowed.find_by_id_mut(&id_set) {
+                    node.set_inner_text(&text);
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                queue_mutation_observers(
+                    vm,
+                    &r_set,
+                    &observers_set_text,
+                    &id_set,
+                    "characterData",
+                    None,
+                );
             }
             Ok(JsValue::Undefined)
         }),
@@ -629,16 +1408,34 @@ fn create_element_wrapper(
 
     let r_setattr = root.clone();
     let id_setattr = elem_id.clone();
+    let observers_setattr = mutation_observers.clone();
     elem_obj.set(
         "setAttribute",
-        JsValue::native("setAttribute", move |_vm, args| {
+        JsValue::native("setAttribute", move |vm, args| {
             let attr = args.first().map(|a| a.to_js_string()).unwrap_or_default();
             let val = args.get(1).map(|a| a.to_js_string()).unwrap_or_default();
-            let mut borrowed = r_setattr.borrow_mut();
-            if let Some(node) = borrowed.find_by_id_mut(&id_setattr) {
-                if let wavecore_dom::NodeType::Element(e) = &mut node.node_type {
-                    e.set_attribute(attr, val);
+            let changed = {
+                let mut borrowed = r_setattr.borrow_mut();
+                if let Some(node) = borrowed.find_by_id_mut(&id_setattr) {
+                    if let wavecore_dom::NodeType::Element(e) = &mut node.node_type {
+                        e.set_attribute(attr.clone(), val);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
                 }
+            };
+            if changed {
+                queue_mutation_observers(
+                    vm,
+                    &r_setattr,
+                    &observers_setattr,
+                    &id_setattr,
+                    "attributes",
+                    Some(&attr),
+                );
             }
             Ok(JsValue::Undefined)
         }),
@@ -709,9 +1506,11 @@ fn create_element_wrapper(
     // appendChild(child): re-parent the existing node instead of cloning it.
     let r_append = root.clone();
     let id_append = elem_id.clone();
+    let observers_append = mutation_observers.clone();
     elem_obj.set(
         "appendChild",
-        JsValue::native("appendChild", move |_vm, args| {
+        JsValue::native("appendChild", move |vm, args| {
+            let mut changed = false;
             if let Some(JsValue::Object(child_obj)) = args.first() {
                 let child_id = child_obj.borrow().get("id").to_js_string();
                 if !child_id.is_empty() && child_id != id_append {
@@ -721,10 +1520,21 @@ fn create_element_wrapper(
                         if let Some(child_node) = borrowed.detach_by_id(child_node_id) {
                             if let Some(parent_node) = borrowed.find_by_id_mut(&id_append) {
                                 parent_node.append_child(child_node);
+                                changed = true;
                             }
                         }
                     }
                 }
+            }
+            if changed {
+                queue_mutation_observers(
+                    vm,
+                    &r_append,
+                    &observers_append,
+                    &id_append,
+                    "childList",
+                    None,
+                );
             }
             Ok(JsValue::Undefined)
         }),
@@ -744,9 +1554,9 @@ fn create_element_wrapper(
         }),
     );
 
-    // addEventListener
-    let l_add = listeners;
-    let id_evt = elem_id;
+    // EventTarget-compatible listener registration/removal and dispatch.
+    let l_add = listeners.clone();
+    let id_evt = elem_id.clone();
     elem_obj.set(
         "addEventListener",
         JsValue::native("addEventListener", move |_vm, args| {
@@ -759,15 +1569,101 @@ fn create_element_wrapper(
         }),
     );
 
+    let l_remove = listeners.clone();
+    let id_remove_evt = elem_id.clone();
+    elem_obj.set(
+        "removeEventListener",
+        JsValue::native("removeEventListener", move |_vm, args| {
+            let evt = args.first().map(|a| a.to_js_string()).unwrap_or_default();
+            let Some(callback) = args.get(1) else {
+                return Ok(JsValue::Undefined);
+            };
+            if let Some(callbacks) = l_remove.borrow_mut().get_mut(&(id_remove_evt.clone(), evt)) {
+                callbacks.retain(|candidate| !same_js_callback(candidate, callback));
+            }
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let l_dispatch = listeners.clone();
+    let r_dispatch = root.clone();
+    let id_dispatch = elem_id.clone();
+    elem_obj.set(
+        "dispatchEvent",
+        JsValue::native("dispatchEvent", move |vm, args| {
+            let Some(JsValue::Object(event_obj)) = args.first() else {
+                return Err("TypeError: dispatchEvent expects an Event object".to_string());
+            };
+            let event_type = event_obj.borrow().get("type").to_js_string();
+            if event_type.is_empty() {
+                return Err("InvalidStateError: event type is empty".to_string());
+            }
+            let bubbles = event_obj.borrow().get("bubbles").is_truthy();
+            let path_ids = {
+                let root = r_dispatch.borrow();
+                let Some(target) = root.find_by_id(&id_dispatch) else {
+                    return Ok(JsValue::Boolean(true));
+                };
+                let mut path = root.ancestor_ids_for(target.node_id()).unwrap_or_default();
+                if !bubbles {
+                    path.retain(|node_id| *node_id == target.node_id());
+                }
+                path
+            };
+
+            event_obj.borrow_mut().set("targetId", JsValue::String(id_dispatch.clone()));
+            for node_id in path_ids.into_iter().rev() {
+                let current_id = {
+                    let root = r_dispatch.borrow();
+                    root.find_by_node_id(node_id)
+                        .and_then(|node| match &node.node_type {
+                            wavecore_dom::NodeType::Element(element) => element.id().map(str::to_string),
+                            _ => None,
+                        })
+                };
+                let Some(current_id) = current_id else { continue; };
+                event_obj.borrow_mut().set(
+                    "currentTargetId",
+                    JsValue::String(current_id.clone()),
+                );
+                let callbacks = l_dispatch
+                    .borrow()
+                    .get(&(current_id, event_type.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                for callback in callbacks {
+                    vm.call_function(&callback, &[JsValue::Object(event_obj.clone())])?;
+                }
+            }
+
+            let prevented = match event_obj.borrow().get("_isDefaultPrevented") {
+                callback @ (JsValue::NativeFunction(_, _) | JsValue::Function(_)) => {
+                    vm.call_function(&callback, &[])?.is_truthy()
+                }
+                _ => false,
+            };
+            Ok(JsValue::Boolean(!prevented))
+        }),
+    );
+
     // getContext(type) for canvas elements
+    let canvas_registry = canvas_commands.clone();
+    let webgl_registry = webgl_commands.clone();
+    let canvas_node_id = internal_node_id;
     elem_obj.set(
         "getContext",
         JsValue::native("getContext", move |_vm, args| {
             let ctx_name = args.first().map(|a| a.to_js_string()).unwrap_or_else(|| "2d".to_string());
             if ctx_name == "2d" {
-                Ok(JsValue::Object(Rc::new(RefCell::new(create_canvas_2d_context()))))
+                Ok(JsValue::Object(Rc::new(RefCell::new(create_canvas_2d_context(
+                    canvas_node_id,
+                    canvas_registry.clone(),
+                )))))
             } else if ctx_name == "webgl" || ctx_name == "experimental-webgl" {
-                Ok(JsValue::Object(Rc::new(RefCell::new(create_webgl_context()))))
+                Ok(JsValue::Object(Rc::new(RefCell::new(create_webgl_context(
+                    canvas_node_id,
+                    webgl_registry.clone(),
+                )))))
             } else {
                 Ok(JsValue::Null)
             }
@@ -791,62 +1687,543 @@ fn create_element_wrapper(
     JsValue::Object(Rc::new(RefCell::new(elem_obj)))
 }
 
-fn create_canvas_2d_context() -> JsObject {
+fn create_canvas_2d_context(
+    node_id: u64,
+    registry: Rc<RefCell<HashMap<u64, Vec<Canvas2DCommand>>>>,
+) -> JsObject {
     let mut ctx = JsObject::new();
+    let fill_style = Rc::new(RefCell::new("#000000".to_string()));
+    let stroke_style = Rc::new(RefCell::new("#000000".to_string()));
+    let line_width = Rc::new(Cell::new(1.0f32));
+
     ctx.set("fillStyle", JsValue::String("#000000".to_string()));
     ctx.set("strokeStyle", JsValue::String("#000000".to_string()));
     ctx.set("lineWidth", JsValue::Number(1.0));
     ctx.set("isCanvas2D", JsValue::Boolean(true));
 
-    ctx.set("fillRect", JsValue::native("fillRect", |_vm, _args| Ok(JsValue::Undefined)));
+    let fs = fill_style.clone();
+    ctx.set(
+        "setFillStyle",
+        JsValue::native("setFillStyle", move |_vm, args| {
+            *fs.borrow_mut() = args.first().map(|v| v.to_js_string()).unwrap_or_else(|| "#000000".into());
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let ss = stroke_style.clone();
+    ctx.set(
+        "setStrokeStyle",
+        JsValue::native("setStrokeStyle", move |_vm, args| {
+            *ss.borrow_mut() = args.first().map(|v| v.to_js_string()).unwrap_or_else(|| "#000000".into());
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let lw = line_width.clone();
+    ctx.set(
+        "setLineWidth",
+        JsValue::native("setLineWidth", move |_vm, args| {
+            lw.set(args.first().map(|v| v.to_number() as f32).unwrap_or(1.0).max(1.0));
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let reg_fill = registry.clone();
+    let fill_style_ref = fill_style.clone();
+    ctx.set(
+        "fillRect",
+        JsValue::native("fillRect", move |_vm, args| {
+            let x = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let y = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let width = args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let height = args.get(3).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            reg_fill.borrow_mut().entry(node_id).or_default().push(
+                Canvas2DCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: fill_style_ref.borrow().clone(),
+                },
+            );
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    let reg_stroke = registry.clone();
+    let stroke_style_ref = stroke_style.clone();
+    let line_width_ref = line_width.clone();
+    ctx.set(
+        "strokeRect",
+        JsValue::native("strokeRect", move |_vm, args| {
+            let x = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let y = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let width = args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            let height = args.get(3).map(|v| v.to_number() as f32).unwrap_or(0.0);
+            reg_stroke.borrow_mut().entry(node_id).or_default().push(
+                Canvas2DCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: stroke_style_ref.borrow().clone(),
+                    line_width: line_width_ref.get(),
+                },
+            );
+            Ok(JsValue::Undefined)
+        }),
+    );
+
+    // clearRect remains conservative until the display-list backend supports
+    // destination-out/transparent replacement semantics.
     ctx.set("clearRect", JsValue::native("clearRect", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("strokeRect", JsValue::native("strokeRect", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("beginPath", JsValue::native("beginPath", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("moveTo", JsValue::native("moveTo", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("lineTo", JsValue::native("lineTo", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("arc", JsValue::native("arc", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("closePath", JsValue::native("closePath", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("fill", JsValue::native("fill", |_vm, _args| Ok(JsValue::Undefined)));
-    ctx.set("stroke", JsValue::native("stroke", |_vm, _args| Ok(JsValue::Undefined)));
+
+    let path = Rc::new(RefCell::new(CanvasPathState::default()));
+
+    let path_begin = path.clone();
+    ctx.set("beginPath", JsValue::native("beginPath", move |_vm, _args| {
+        *path_begin.borrow_mut() = CanvasPathState::default();
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_move = path.clone();
+    ctx.set("moveTo", JsValue::native("moveTo", move |_vm, args| {
+        let x = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let y = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let mut state = path_move.borrow_mut();
+        state.current = Some((x, y));
+        state.first = Some((x, y));
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_line = path.clone();
+    ctx.set("lineTo", JsValue::native("lineTo", move |_vm, args| {
+        let x = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let y = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let mut state = path_line.borrow_mut();
+        let (x1, y1) = state.current.unwrap_or((0.0, 0.0));
+        if state.first.is_none() {
+            state.first = Some((x1, y1));
+        }
+        state.primitives.push(CanvasPathPrimitive::Line { x1, y1, x2: x, y2: y });
+        state.current = Some((x, y));
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_arc = path.clone();
+    ctx.set("arc", JsValue::native("arc", move |_vm, args| {
+        let cx = args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let cy = args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0);
+        let radius = args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0).max(0.0);
+        if radius > 0.0 {
+            let mut state = path_arc.borrow_mut();
+            state.primitives.push(CanvasPathPrimitive::Circle { cx, cy, radius });
+            let end_x = cx + radius;
+            let end_y = cy;
+            if state.first.is_none() {
+                state.first = Some((end_x, end_y));
+            }
+            state.current = Some((end_x, end_y));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_close = path.clone();
+    ctx.set("closePath", JsValue::native("closePath", move |_vm, _args| {
+        let mut state = path_close.borrow_mut();
+        if let (Some((x1, y1)), Some((x2, y2))) = (state.current, state.first) {
+            if (x1 - x2).abs() > f32::EPSILON || (y1 - y2).abs() > f32::EPSILON {
+                state.primitives.push(CanvasPathPrimitive::Line { x1, y1, x2, y2 });
+            }
+            state.current = Some((x2, y2));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_fill = path.clone();
+    let reg_path_fill = registry.clone();
+    let fill_for_path = fill_style.clone();
+    ctx.set("fill", JsValue::native("fill", move |_vm, _args| {
+        let color = fill_for_path.borrow().clone();
+        let primitives = path_fill.borrow().primitives.clone();
+        let mut registry = reg_path_fill.borrow_mut();
+        let commands = registry.entry(node_id).or_default();
+        for primitive in primitives {
+            if let CanvasPathPrimitive::Circle { cx, cy, radius } = primitive {
+                commands.push(Canvas2DCommand::FillCircle { cx, cy, radius, color: color.clone() });
+            }
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    let path_stroke = path.clone();
+    let reg_path_stroke = registry.clone();
+    let stroke_for_path = stroke_style.clone();
+    let width_for_path = line_width.clone();
+    ctx.set("stroke", JsValue::native("stroke", move |_vm, _args| {
+        let color = stroke_for_path.borrow().clone();
+        let width = width_for_path.get();
+        let primitives = path_stroke.borrow().primitives.clone();
+        let mut registry = reg_path_stroke.borrow_mut();
+        let commands = registry.entry(node_id).or_default();
+        for primitive in primitives {
+            match primitive {
+                CanvasPathPrimitive::Line { x1, y1, x2, y2 } => {
+                    commands.push(Canvas2DCommand::DrawLine {
+                        x1, y1, x2, y2, color: color.clone(), line_width: width,
+                    });
+                }
+                CanvasPathPrimitive::Circle { cx, cy, radius } => {
+                    commands.push(Canvas2DCommand::StrokeCircle {
+                        cx, cy, radius, color: color.clone(), line_width: width,
+                    });
+                }
+            }
+        }
+        Ok(JsValue::Undefined)
+    }));
 
     ctx
 }
 
-fn create_webgl_context() -> JsObject {
+fn create_webgl_context(
+    node_id: u64,
+    registry: Rc<RefCell<HashMap<u64, Vec<WebGlCommand>>>>,
+) -> JsObject {
     let mut gl = JsObject::new();
     gl.set("isWebGL", JsValue::Boolean(true));
-    gl.set("COLOR_BUFFER_BIT", JsValue::Number(16384.0));
-    gl.set("DEPTH_BUFFER_BIT", JsValue::Number(256.0));
-    gl.set("TRIANGLES", JsValue::Number(4.0));
-    gl.set("ARRAY_BUFFER", JsValue::Number(34962.0));
-    gl.set("STATIC_DRAW", JsValue::Number(35044.0));
+    gl.set("NO_ERROR", JsValue::Number(0.0));
+    gl.set("COLOR_BUFFER_BIT", JsValue::Number(0x4000 as f64));
+    gl.set("DEPTH_BUFFER_BIT", JsValue::Number(0x0100 as f64));
+    gl.set("TRIANGLES", JsValue::Number(0x0004 as f64));
+    gl.set("ARRAY_BUFFER", JsValue::Number(0x8892 as f64));
+    gl.set("ELEMENT_ARRAY_BUFFER", JsValue::Number(0x8893 as f64));
+    gl.set("STATIC_DRAW", JsValue::Number(0x88E4 as f64));
+    gl.set("FLOAT", JsValue::Number(0x1406 as f64));
+    gl.set("UNSIGNED_SHORT", JsValue::Number(0x1403 as f64));
+    gl.set("UNSIGNED_INT", JsValue::Number(0x1405 as f64));
+    gl.set("VERTEX_SHADER", JsValue::Number(0x8B31 as f64));
+    gl.set("FRAGMENT_SHADER", JsValue::Number(0x8B30 as f64));
+    gl.set("COMPILE_STATUS", JsValue::Number(0x8B81 as f64));
+    gl.set("LINK_STATUS", JsValue::Number(0x8B82 as f64));
 
-    gl.set("viewport", JsValue::native("viewport", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("clearColor", JsValue::native("clearColor", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("clear", JsValue::native("clear", |_vm, _args| Ok(JsValue::Undefined)));
+    let reg_viewport = registry.clone();
+    gl.set("viewport", JsValue::native("viewport", move |_vm, args| {
+        let x = args.get(0).map(|v| v.to_number() as i32).unwrap_or(0);
+        let y = args.get(1).map(|v| v.to_number() as i32).unwrap_or(0);
+        let width = args.get(2).map(|v| v.to_number() as i32).unwrap_or(0).max(0);
+        let height = args.get(3).map(|v| v.to_number() as i32).unwrap_or(0).max(0);
+        reg_viewport.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::Viewport { x, y, width, height }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_clear_color = registry.clone();
+    gl.set("clearColor", JsValue::native("clearColor", move |_vm, args| {
+        let color = [
+            args.get(0).map(|v| v.to_number() as f32).unwrap_or(0.0).clamp(0.0, 1.0),
+            args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0).clamp(0.0, 1.0),
+            args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0).clamp(0.0, 1.0),
+            args.get(3).map(|v| v.to_number() as f32).unwrap_or(0.0).clamp(0.0, 1.0),
+        ];
+        reg_clear_color.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::ClearColor(color)
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_clear = registry.clone();
+    gl.set("clear", JsValue::native("clear", move |_vm, args| {
+        let mask = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_clear.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::Clear { mask }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
     gl.set("createBuffer", JsValue::native("createBuffer", |_vm, _args| {
+        let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst) as u32;
         let mut buf = JsObject::new();
-        buf.set("_webglBufferId", JsValue::Number(1.0));
+        buf.set("_webglBufferId", JsValue::Number(id as f64));
         Ok(JsValue::Object(Rc::new(RefCell::new(buf))))
     }));
-    gl.set("bindBuffer", JsValue::native("bindBuffer", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("bufferData", JsValue::native("bufferData", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("createShader", JsValue::native("createShader", |_vm, _args| {
-        let mut s = JsObject::new();
-        s.set("_webglShaderId", JsValue::Number(1.0));
-        Ok(JsValue::Object(Rc::new(RefCell::new(s))))
+
+    let bound_buffer = Rc::new(Cell::new(None::<u32>));
+    let bound_element_buffer = Rc::new(Cell::new(None::<u32>));
+    let bound_for_bind = bound_buffer.clone();
+    let bound_element_for_bind = bound_element_buffer.clone();
+    let reg_bind = registry.clone();
+    gl.set("bindBuffer", JsValue::native("bindBuffer", move |_vm, args| {
+        let target = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
+        let id = args.get(1).and_then(webgl_object_id);
+        match target {
+            0x8892 => {
+                bound_for_bind.set(id);
+                reg_bind.borrow_mut().entry(node_id).or_default().push(
+                    WebGlCommand::BindArrayBuffer(id)
+                );
+            }
+            0x8893 => {
+                bound_element_for_bind.set(id);
+                reg_bind.borrow_mut().entry(node_id).or_default().push(
+                    WebGlCommand::BindElementArrayBuffer(id)
+                );
+            }
+            _ => {}
+        }
+        Ok(JsValue::Undefined)
     }));
-    gl.set("shaderSource", JsValue::native("shaderSource", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("compileShader", JsValue::native("compileShader", |_vm, _args| Ok(JsValue::Undefined)));
+
+    let bound_for_data = bound_buffer.clone();
+    let bound_element_for_data = bound_element_buffer.clone();
+    let reg_data = registry.clone();
+    gl.set("bufferData", JsValue::native("bufferData", move |_vm, args| {
+        let target = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
+        match target {
+            0x8892 => {
+                let Some(id) = bound_for_data.get() else {
+                    return Ok(JsValue::Undefined);
+                };
+                let data = args.get(1).map(js_number_vec).unwrap_or_default();
+                reg_data.borrow_mut().entry(node_id).or_default().push(
+                    WebGlCommand::UploadArrayBuffer { id, data }
+                );
+            }
+            0x8893 => {
+                let Some(id) = bound_element_for_data.get() else {
+                    return Ok(JsValue::Undefined);
+                };
+                let data = args.get(1).map(js_u32_vec).unwrap_or_default();
+                reg_data.borrow_mut().entry(node_id).or_default().push(
+                    WebGlCommand::UploadElementArrayBuffer { id, data }
+                );
+            }
+            _ => {}
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("createShader", JsValue::native("createShader", |_vm, args| {
+        let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst) as u32;
+        let shader_type = args.first().map(|v| v.to_number()).unwrap_or(0.0);
+        let mut shader = JsObject::new();
+        shader.set("_webglShaderId", JsValue::Number(id as f64));
+        shader.set("_webglShaderType", JsValue::Number(shader_type));
+        shader.set("_webglSource", JsValue::String(String::new()));
+        shader.set("_webglCompiled", JsValue::Boolean(false));
+        Ok(JsValue::Object(Rc::new(RefCell::new(shader))))
+    }));
+
+    gl.set("shaderSource", JsValue::native("shaderSource", |_vm, args| {
+        if let Some(JsValue::Object(shader)) = args.first() {
+            let source = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+            shader.borrow_mut().set("_webglSource", JsValue::String(source));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("compileShader", JsValue::native("compileShader", |_vm, args| {
+        if let Some(JsValue::Object(shader)) = args.first() {
+            let source = shader.borrow().get("_webglSource").to_js_string();
+            shader.borrow_mut().set("_webglCompiled", JsValue::Boolean(!source.trim().is_empty()));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("getShaderParameter", JsValue::native("getShaderParameter", |_vm, args| {
+        if let Some(JsValue::Object(shader)) = args.first() {
+            return Ok(shader.borrow().get("_webglCompiled"));
+        }
+        Ok(JsValue::Boolean(false))
+    }));
+
+    gl.set("getShaderInfoLog", JsValue::native("getShaderInfoLog", |_vm, args| {
+        if let Some(JsValue::Object(shader)) = args.first() {
+            if shader.borrow().get("_webglCompiled").is_truthy() {
+                return Ok(JsValue::String(String::new()));
+            }
+        }
+        Ok(JsValue::String("WaveCore: shader source is empty or unsupported".to_string()))
+    }));
+
     gl.set("createProgram", JsValue::native("createProgram", |_vm, _args| {
-        let mut p = JsObject::new();
-        p.set("_webglProgramId", JsValue::Number(1.0));
-        Ok(JsValue::Object(Rc::new(RefCell::new(p))))
+        let id = ELEMENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst) as u32;
+        let mut program = JsObject::new();
+        program.set("_webglProgramId", JsValue::Number(id as f64));
+        program.set("_webglAttachedCount", JsValue::Number(0.0));
+        program.set("_webglLinked", JsValue::Boolean(false));
+        Ok(JsValue::Object(Rc::new(RefCell::new(program))))
     }));
-    gl.set("attachShader", JsValue::native("attachShader", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("linkProgram", JsValue::native("linkProgram", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("useProgram", JsValue::native("useProgram", |_vm, _args| Ok(JsValue::Undefined)));
-    gl.set("drawArrays", JsValue::native("drawArrays", |_vm, _args| Ok(JsValue::Undefined)));
+
+    gl.set("attachShader", JsValue::native("attachShader", |_vm, args| {
+        if let Some(JsValue::Object(program)) = args.first() {
+            let count = program.borrow().get("_webglAttachedCount").to_number();
+            program.borrow_mut().set("_webglAttachedCount", JsValue::Number(count + 1.0));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("linkProgram", JsValue::native("linkProgram", |_vm, args| {
+        if let Some(JsValue::Object(program)) = args.first() {
+            let linked = program.borrow().get("_webglAttachedCount").to_number() >= 2.0;
+            program.borrow_mut().set("_webglLinked", JsValue::Boolean(linked));
+        }
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("getProgramParameter", JsValue::native("getProgramParameter", |_vm, args| {
+        if let Some(JsValue::Object(program)) = args.first() {
+            return Ok(program.borrow().get("_webglLinked"));
+        }
+        Ok(JsValue::Boolean(false))
+    }));
+
+    let reg_program = registry.clone();
+    gl.set("useProgram", JsValue::native("useProgram", move |_vm, args| {
+        let id = args.first().and_then(|value| match value {
+            JsValue::Object(object) => {
+                let raw = object.borrow().get("_webglProgramId").to_number();
+                raw.is_finite().then_some(raw as u32)
+            }
+            JsValue::Null => None,
+            _ => None,
+        });
+        reg_program.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::UseProgram(id)
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_pointer = registry.clone();
+    let bound_for_pointer = bound_buffer.clone();
+    gl.set("vertexAttribPointer", JsValue::native("vertexAttribPointer", move |_vm, args| {
+        let index = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0);
+        let size = args.get(1).map(|v| v.to_number() as u32).unwrap_or(2).clamp(1, 4);
+        let stride_bytes = args.get(4).map(|v| v.to_number() as u32).unwrap_or(0);
+        let offset_bytes = args.get(5).map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_pointer.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::VertexAttribPointer {
+                index,
+                size,
+                stride_floats: stride_bytes / 4,
+                offset_floats: offset_bytes / 4,
+                buffer_id: bound_for_pointer.get(),
+            }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_attr4f = registry.clone();
+    gl.set("vertexAttrib4f", JsValue::native("vertexAttrib4f", move |_vm, args| {
+        let index = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0);
+        let value = [
+            args.get(1).map(|v| v.to_number() as f32).unwrap_or(0.0),
+            args.get(2).map(|v| v.to_number() as f32).unwrap_or(0.0),
+            args.get(3).map(|v| v.to_number() as f32).unwrap_or(0.0),
+            args.get(4).map(|v| v.to_number() as f32).unwrap_or(1.0),
+        ];
+        reg_attr4f.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::VertexAttrib4f { index, value }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_enable = registry.clone();
+    gl.set("enableVertexAttribArray", JsValue::native("enableVertexAttribArray", move |_vm, args| {
+        let index = args.first().map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_enable.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::EnableVertexAttribArray(index)
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_draw = registry.clone();
+    gl.set("drawArrays", JsValue::native("drawArrays", move |_vm, args| {
+        let mode = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0x0004);
+        let first = args.get(1).map(|v| v.to_number() as u32).unwrap_or(0);
+        let count = args.get(2).map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_draw.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::DrawArrays { mode, first, count }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    let reg_draw_elements = registry.clone();
+    gl.set("drawElements", JsValue::native("drawElements", move |_vm, args| {
+        let mode = args.get(0).map(|v| v.to_number() as u32).unwrap_or(0x0004);
+        let count = args.get(1).map(|v| v.to_number() as u32).unwrap_or(0);
+        let element_type = args.get(2).map(|v| v.to_number() as u32).unwrap_or(0x1403);
+        let offset_bytes = args.get(3).map(|v| v.to_number() as u32).unwrap_or(0);
+        reg_draw_elements.borrow_mut().entry(node_id).or_default().push(
+            WebGlCommand::DrawElements { mode, count, element_type, offset_bytes }
+        );
+        Ok(JsValue::Undefined)
+    }));
+
+    gl.set("getError", JsValue::native("getError", |_vm, _args| {
+        Ok(JsValue::Number(0.0))
+    }));
 
     gl
 }
+
+fn webgl_object_id(value: &JsValue) -> Option<u32> {
+    match value {
+        JsValue::Object(object) => {
+            let id = object.borrow().get("_webglBufferId").to_number();
+            id.is_finite().then_some(id as u32)
+        }
+        JsValue::Null => None,
+        _ => None,
+    }
+}
+
+fn js_u32_vec(value: &JsValue) -> Vec<u32> {
+    match value {
+        JsValue::Array(items) => items
+            .borrow()
+            .iter()
+            .map(|item| item.to_number())
+            .filter(|number| number.is_finite() && *number >= 0.0)
+            .map(|number| number as u32)
+            .collect(),
+        JsValue::TypedArray(items) => items
+            .borrow()
+            .values()
+            .iter()
+            .map(|item| item.to_number())
+            .filter(|number| number.is_finite() && *number >= 0.0)
+            .map(|number| number as u32)
+            .collect(),
+        _ => value
+            .to_js_string()
+            .split(',')
+            .filter_map(|part| part.trim().parse::<u32>().ok())
+            .collect(),
+    }
+}
+
+fn js_number_vec(value: &JsValue) -> Vec<f32> {
+    match value {
+        JsValue::Array(items) => items
+            .borrow()
+            .iter()
+            .map(|item| item.to_number() as f32)
+            .filter(|number| number.is_finite())
+            .collect(),
+        JsValue::TypedArray(items) => items
+            .borrow()
+            .values()
+            .iter()
+            .map(|item| item.to_number() as f32)
+            .filter(|number| number.is_finite())
+            .collect(),
+        _ => value
+            .to_js_string()
+            .split(',')
+            .filter_map(|part| part.trim().parse::<f32>().ok())
+            .collect(),
+    }
+}
+

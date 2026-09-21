@@ -1,10 +1,11 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use crate::bytecode::{Chunk, OpCode};
 use crate::value::{
-    Environment, JsFunction, JsObject, JsPromise, JsValue, PromiseState,
+    Environment, JsFunction, JsObject, JsPromise, JsValue, PromiseReaction, PromiseState,
+    TypedArrayKind, TypedArrayValue,
 };
 
 pub struct CallFrame {
@@ -12,6 +13,7 @@ pub struct CallFrame {
     pub ip: usize,
     pub stack_start: usize,
     pub env: Rc<RefCell<Environment>>,
+    pub is_async: bool,
 }
 
 #[derive(Clone)]
@@ -32,7 +34,126 @@ pub struct VM {
     pub microtasks: VecDeque<Rc<dyn Fn(&mut VM) -> Result<(), String>>>,
     pub instruction_limit: usize,
     pub instruction_count: usize,
+    pub max_call_depth: usize,
+    pub max_microtasks_per_checkpoint: usize,
     pub console_output: Vec<String>,
+}
+
+fn make_typed_array(args: &[JsValue], kind: TypedArrayKind) -> Result<JsValue, String> {
+    let source = args.first();
+    let array = match source {
+        Some(JsValue::ArrayBuffer(buffer)) => {
+            let byte_offset = args
+                .get(1)
+                .map(|v| v.to_number().max(0.0) as usize)
+                .unwrap_or(0);
+            let length = args.get(2).and_then(|v| {
+                let n = v.to_number();
+                (n.is_finite() && n >= 0.0).then_some(n as usize)
+            });
+            TypedArrayValue::from_buffer(buffer.clone(), kind, byte_offset, length)?
+        }
+        Some(JsValue::TypedArray(other)) => {
+            let values = other.borrow().values();
+            let mut out = TypedArrayValue::new(kind, values.len());
+            for (index, value) in values.iter().enumerate() {
+                out.set(index, value.to_number());
+            }
+            out
+        }
+        Some(JsValue::Array(items)) => {
+            let values = items.borrow();
+            let mut out = TypedArrayValue::new(kind, values.len());
+            for (index, value) in values.iter().enumerate() {
+                out.set(index, value.to_number());
+            }
+            out
+        }
+        Some(JsValue::Number(length)) if length.is_finite() && *length >= 0.0 => {
+            let length = (*length as usize).min(16_777_216);
+            TypedArrayValue::new(kind, length)
+        }
+        Some(other) => {
+            let mut out = TypedArrayValue::new(kind, 1);
+            out.set(0, other.to_number());
+            out
+        }
+        None => TypedArrayValue::new(kind, 0),
+    };
+    Ok(JsValue::TypedArray(Rc::new(RefCell::new(array))))
+}
+
+fn json_to_js(value: &serde_json::Value) -> JsValue {
+    match value {
+        serde_json::Value::Null => JsValue::Null,
+        serde_json::Value::Bool(v) => JsValue::Boolean(*v),
+        serde_json::Value::Number(v) => JsValue::Number(v.as_f64().unwrap_or(f64::NAN)),
+        serde_json::Value::String(v) => JsValue::String(v.clone()),
+        serde_json::Value::Array(items) => {
+            JsValue::new_array(items.iter().map(json_to_js).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut obj = JsObject::new();
+            for (key, value) in map {
+                obj.set(key.clone(), json_to_js(value));
+            }
+            JsValue::Object(Rc::new(RefCell::new(obj)))
+        }
+    }
+}
+
+fn js_to_json(value: &JsValue, depth: usize) -> Result<serde_json::Value, String> {
+    if depth > 128 {
+        return Err("JSON.stringify exceeded maximum nesting depth".to_string());
+    }
+    Ok(match value {
+        JsValue::Undefined
+        | JsValue::Function(_)
+        | JsValue::NativeFunction(_, _)
+        | JsValue::Promise(_) => serde_json::Value::Null,
+        JsValue::Null => serde_json::Value::Null,
+        JsValue::Boolean(v) => serde_json::Value::Bool(*v),
+        JsValue::Number(v) => {
+            if !v.is_finite() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Number::from_f64(*v)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }
+        JsValue::String(v) => serde_json::Value::String(v.clone()),
+        JsValue::Array(items) => serde_json::Value::Array(
+            items
+                .borrow()
+                .iter()
+                .map(|item| js_to_json(item, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        JsValue::TypedArray(items) => serde_json::Value::Array(
+            items
+                .borrow()
+                .values()
+                .iter()
+                .map(|item| js_to_json(item, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        JsValue::ArrayBuffer(_) => serde_json::Value::Object(serde_json::Map::new()),
+        JsValue::Object(obj) => {
+            let borrowed = obj.borrow();
+            let mut map = serde_json::Map::new();
+            for (key, value) in &borrowed.properties {
+                if matches!(
+                    value,
+                    JsValue::Undefined | JsValue::Function(_) | JsValue::NativeFunction(_, _)
+                ) {
+                    continue;
+                }
+                map.insert(key.clone(), js_to_json(value, depth + 1)?);
+            }
+            serde_json::Value::Object(map)
+        }
+    })
 }
 
 impl VM {
@@ -48,6 +169,8 @@ impl VM {
             microtasks: VecDeque::new(),
             instruction_limit: 1_000_000,
             instruction_count: 0,
+            max_call_depth: 512,
+            max_microtasks_per_checkpoint: 10_000,
             console_output: Vec::new(),
         };
 
@@ -179,7 +302,19 @@ impl VM {
             "stringify",
             JsValue::native("stringify", |_vm, args| {
                 let val = args.first().cloned().unwrap_or(JsValue::Undefined);
-                Ok(JsValue::String(val.to_js_string()))
+                let json_value = js_to_json(&val, 0)?;
+                serde_json::to_string(&json_value)
+                    .map(JsValue::String)
+                    .map_err(|e| format!("JSON.stringify failed: {e}"))
+            }),
+        );
+        json.set(
+            "parse",
+            JsValue::native("parse", |_vm, args| {
+                let text = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| format!("JSON.parse failed: {e}"))?;
+                Ok(json_to_js(&parsed))
             }),
         );
         self.globals.insert(
@@ -196,9 +331,107 @@ impl VM {
                 Ok(JsValue::Boolean(is_arr))
             }),
         );
+        array_obj.set(
+            "from",
+            JsValue::native("from", |_vm, args| {
+                let Some(source) = args.first() else {
+                    return Ok(JsValue::new_array(Vec::new()));
+                };
+                match source {
+                    JsValue::Array(items) => Ok(JsValue::new_array(items.borrow().clone())),
+                    JsValue::TypedArray(items) => Ok(JsValue::new_array(items.borrow().values())),
+                    JsValue::String(text) => Ok(JsValue::new_array(
+                        text.chars()
+                            .map(|ch| JsValue::String(ch.to_string()))
+                            .collect(),
+                    )),
+                    _ => Ok(JsValue::new_array(Vec::new())),
+                }
+            }),
+        );
         self.globals.insert(
             "Array".to_string(),
             JsValue::Object(Rc::new(RefCell::new(array_obj))),
+        );
+
+        // Object helpers used by common framework/runtime code.
+        let mut object_obj = JsObject::new();
+        object_obj.set(
+            "keys",
+            JsValue::native("keys", |_vm, args| {
+                let mut keys = match args.first() {
+                    Some(JsValue::Object(obj)) => obj
+                        .borrow()
+                        .properties
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    Some(JsValue::Array(items)) => (0..items.borrow().len())
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>(),
+                    Some(JsValue::TypedArray(items)) => (0..items.borrow().length)
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                keys.sort();
+                Ok(JsValue::new_array(
+                    keys.into_iter().map(JsValue::String).collect(),
+                ))
+            }),
+        );
+        object_obj.set(
+            "assign",
+            JsValue::native("assign", |_vm, args| {
+                let target = args.first().cloned().unwrap_or_else(JsValue::new_object);
+                let JsValue::Object(target_obj) = &target else {
+                    return Ok(target);
+                };
+                for source in args.iter().skip(1) {
+                    if let JsValue::Object(source_obj) = source {
+                        let properties = source_obj.borrow().properties.clone();
+                        for (key, value) in properties {
+                            target_obj.borrow_mut().set(key, value);
+                        }
+                    }
+                }
+                Ok(target)
+            }),
+        );
+        self.globals.insert(
+            "Object".to_string(),
+            JsValue::Object(Rc::new(RefCell::new(object_obj))),
+        );
+
+        // ArrayBuffer and typed arrays share a real byte backing store.
+        self.globals.insert(
+            "ArrayBuffer".to_string(),
+            JsValue::native("ArrayBuffer", |_vm, args| {
+                let length = args
+                    .first()
+                    .map(|v| v.to_number())
+                    .unwrap_or(0.0);
+                if !length.is_finite() || length < 0.0 || length > 268_435_456.0 {
+                    return Err("RangeError: invalid ArrayBuffer length".to_string());
+                }
+                Ok(JsValue::ArrayBuffer(Rc::new(RefCell::new(vec![0; length as usize]))))
+            }),
+        );
+        self.globals.insert(
+            "Float32Array".to_string(),
+            JsValue::native("Float32Array", |_vm, args| make_typed_array(args, TypedArrayKind::Float32)),
+        );
+        self.globals.insert(
+            "Uint8Array".to_string(),
+            JsValue::native("Uint8Array", |_vm, args| make_typed_array(args, TypedArrayKind::Uint8)),
+        );
+        self.globals.insert(
+            "Uint16Array".to_string(),
+            JsValue::native("Uint16Array", |_vm, args| make_typed_array(args, TypedArrayKind::Uint16)),
+        );
+        self.globals.insert(
+            "Uint32Array".to_string(),
+            JsValue::native("Uint32Array", |_vm, args| make_typed_array(args, TypedArrayKind::Uint32)),
         );
 
         // Promise built-in
@@ -221,9 +454,409 @@ impl VM {
                 ))))
             }),
         );
+        promise_obj.set(
+            "all",
+            JsValue::native("all", |vm, args| {
+                let Some(JsValue::Array(items)) = args.first() else {
+                    return Ok(JsValue::Promise(Rc::new(RefCell::new(
+                        JsPromise::resolved(JsValue::new_array(Vec::new())),
+                    ))));
+                };
+
+                let items = items.borrow().clone();
+                let aggregate = Rc::new(RefCell::new(JsPromise::pending()));
+                if items.is_empty() {
+                    vm.settle_promise(
+                        &aggregate,
+                        PromiseState::Fulfilled(JsValue::new_array(Vec::new())),
+                    );
+                    return Ok(JsValue::Promise(aggregate));
+                }
+
+                let values = Rc::new(RefCell::new(vec![JsValue::Undefined; items.len()]));
+                let remaining = Rc::new(Cell::new(items.len()));
+
+                for (index, item) in items.into_iter().enumerate() {
+                    match item {
+                        JsValue::Promise(source) => {
+                            let state = source.borrow().state.clone();
+                            match state {
+                                PromiseState::Fulfilled(value) => {
+                                    values.borrow_mut()[index] = value;
+                                    remaining.set(remaining.get().saturating_sub(1));
+                                }
+                                PromiseState::Rejected(error) => {
+                                    vm.settle_promise(
+                                        &aggregate,
+                                        PromiseState::Rejected(error),
+                                    );
+                                    return Ok(JsValue::Promise(aggregate));
+                                }
+                                PromiseState::Pending => {
+                                    let values_ok = values.clone();
+                                    let remaining_ok = remaining.clone();
+                                    let aggregate_ok = aggregate.clone();
+                                    let on_fulfilled = JsValue::native(
+                                        format!("Promise.all[{index}]:fulfilled"),
+                                        move |vm, args| {
+                                            values_ok.borrow_mut()[index] = args
+                                                .first()
+                                                .cloned()
+                                                .unwrap_or(JsValue::Undefined);
+                                            let next = remaining_ok.get().saturating_sub(1);
+                                            remaining_ok.set(next);
+                                            if next == 0 {
+                                                vm.settle_promise(
+                                                    &aggregate_ok,
+                                                    PromiseState::Fulfilled(JsValue::new_array(
+                                                        values_ok.borrow().clone(),
+                                                    )),
+                                                );
+                                            }
+                                            Ok(JsValue::Undefined)
+                                        },
+                                    );
+
+                                    let aggregate_err = aggregate.clone();
+                                    let on_rejected = JsValue::native(
+                                        format!("Promise.all[{index}]:rejected"),
+                                        move |vm, args| {
+                                            vm.settle_promise(
+                                                &aggregate_err,
+                                                PromiseState::Rejected(
+                                                    args.first()
+                                                        .cloned()
+                                                        .unwrap_or(JsValue::Undefined),
+                                                ),
+                                            );
+                                            Ok(JsValue::Undefined)
+                                        },
+                                    );
+
+                                    source.borrow_mut().then_callbacks.push(PromiseReaction {
+                                        on_fulfilled: Some(on_fulfilled),
+                                        on_rejected: Some(on_rejected),
+                                        child: Rc::new(RefCell::new(JsPromise::pending())),
+                                    });
+                                }
+                            }
+                        }
+                        value => {
+                            values.borrow_mut()[index] = value;
+                            remaining.set(remaining.get().saturating_sub(1));
+                        }
+                    }
+                }
+
+                if remaining.get() == 0
+                    && matches!(aggregate.borrow().state, PromiseState::Pending)
+                {
+                    vm.settle_promise(
+                        &aggregate,
+                        PromiseState::Fulfilled(JsValue::new_array(values.borrow().clone())),
+                    );
+                }
+
+                Ok(JsValue::Promise(aggregate))
+            }),
+        );
+        promise_obj.set(
+            "race",
+            JsValue::native("race", |vm, args| {
+                let Some(JsValue::Array(items)) = args.first() else {
+                    return Ok(JsValue::Promise(Rc::new(RefCell::new(JsPromise::pending()))));
+                };
+
+                let aggregate = Rc::new(RefCell::new(JsPromise::pending()));
+                for item in items.borrow().iter().cloned() {
+                    match item {
+                        JsValue::Promise(source) => match source.borrow().state.clone() {
+                            PromiseState::Fulfilled(value) => {
+                                vm.settle_promise(
+                                    &aggregate,
+                                    PromiseState::Fulfilled(value),
+                                );
+                                break;
+                            }
+                            PromiseState::Rejected(error) => {
+                                vm.settle_promise(
+                                    &aggregate,
+                                    PromiseState::Rejected(error),
+                                );
+                                break;
+                            }
+                            PromiseState::Pending => {
+                                let aggregate_ok = aggregate.clone();
+                                let on_fulfilled = JsValue::native(
+                                    "Promise.race:fulfilled",
+                                    move |vm, args| {
+                                        vm.settle_promise(
+                                            &aggregate_ok,
+                                            PromiseState::Fulfilled(
+                                                args.first()
+                                                    .cloned()
+                                                    .unwrap_or(JsValue::Undefined),
+                                            ),
+                                        );
+                                        Ok(JsValue::Undefined)
+                                    },
+                                );
+                                let aggregate_err = aggregate.clone();
+                                let on_rejected = JsValue::native(
+                                    "Promise.race:rejected",
+                                    move |vm, args| {
+                                        vm.settle_promise(
+                                            &aggregate_err,
+                                            PromiseState::Rejected(
+                                                args.first()
+                                                    .cloned()
+                                                    .unwrap_or(JsValue::Undefined),
+                                            ),
+                                        );
+                                        Ok(JsValue::Undefined)
+                                    },
+                                );
+                                source.borrow_mut().then_callbacks.push(PromiseReaction {
+                                    on_fulfilled: Some(on_fulfilled),
+                                    on_rejected: Some(on_rejected),
+                                    child: Rc::new(RefCell::new(JsPromise::pending())),
+                                });
+                            }
+                        },
+                        value => {
+                            vm.settle_promise(
+                                &aggregate,
+                                PromiseState::Fulfilled(value),
+                            );
+                            break;
+                        }
+                    }
+                }
+                Ok(JsValue::Promise(aggregate))
+            }),
+        );
         self.globals.insert(
             "Promise".to_string(),
             JsValue::Object(Rc::new(RefCell::new(promise_obj))),
+        );
+
+        // Date constructor with millisecond time values and core instance methods.
+        self.globals.insert(
+            "Date".to_string(),
+            JsValue::native("Date", |_vm, args| {
+                let millis = match args.first() {
+                    Some(value) => value.to_number(),
+                    None => std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0),
+                };
+                let millis = if millis.is_finite() { millis } else { f64::NAN };
+                let mut date = JsObject::new();
+                date.set("_timeValue", JsValue::Number(millis));
+
+                date.set(
+                    "getTime",
+                    JsValue::native("getTime", move |_vm, _args| {
+                        Ok(JsValue::Number(millis))
+                    }),
+                );
+                date.set(
+                    "valueOf",
+                    JsValue::native("valueOf", move |_vm, _args| {
+                        Ok(JsValue::Number(millis))
+                    }),
+                );
+                date.set(
+                    "toString",
+                    JsValue::native("toString", move |_vm, _args| {
+                        if millis.is_finite() {
+                            Ok(JsValue::String(format!("Date({millis:.0})")))
+                        } else {
+                            Ok(JsValue::String("Invalid Date".to_string()))
+                        }
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(date))))
+            }),
+        );
+
+        // Intl compatibility surface for common framework/runtime formatting paths.
+        // This is intentionally deterministic and locale-light; ICU-grade locale data
+        // can replace the formatter internals later without changing the JS API shape.
+        let mut intl = JsObject::new();
+        intl.set(
+            "NumberFormat",
+            JsValue::native("NumberFormat", |_vm, args| {
+                let locale = args
+                    .first()
+                    .map(|v| v.to_js_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "en-US".to_string());
+                let mut formatter = JsObject::new();
+                let locale_for_format = locale.clone();
+                formatter.set(
+                    "format",
+                    JsValue::native("format", move |_vm, args| {
+                        let value = args.first().map(|v| v.to_number()).unwrap_or(f64::NAN);
+                        if !value.is_finite() {
+                            return Ok(JsValue::String(value.to_string()));
+                        }
+                        let mut text = if value.fract() == 0.0 {
+                            format!("{:.0}", value)
+                        } else {
+                            let mut s = format!("{value:.3}");
+                            while s.ends_with('0') { s.pop(); }
+                            if s.ends_with('.') { s.pop(); }
+                            s
+                        };
+                        let decimal = if locale_for_format.starts_with("de")
+                            || locale_for_format.starts_with("fr")
+                        {
+                            ','
+                        } else {
+                            '.'
+                        };
+                        if decimal != '.' {
+                            text = text.replace('.', &decimal.to_string());
+                        }
+                        Ok(JsValue::String(text))
+                    }),
+                );
+                let locale_for_options = locale.clone();
+                formatter.set(
+                    "resolvedOptions",
+                    JsValue::native("resolvedOptions", move |_vm, _args| {
+                        let mut options = JsObject::new();
+                        options.set("locale", JsValue::String(locale_for_options.clone()));
+                        options.set("style", JsValue::String("decimal".to_string()));
+                        Ok(JsValue::Object(Rc::new(RefCell::new(options))))
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(formatter))))
+            }),
+        );
+        intl.set(
+            "DateTimeFormat",
+            JsValue::native("DateTimeFormat", |_vm, args| {
+                let locale = args
+                    .first()
+                    .map(|v| v.to_js_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "en-US".to_string());
+                let mut formatter = JsObject::new();
+                formatter.set(
+                    "format",
+                    JsValue::native("format", move |_vm, args| {
+                        let millis = args.first().map(|v| match v {
+                            JsValue::Object(obj) => obj.borrow().get("_timeValue").to_number(),
+                            other => other.to_number(),
+                        }).unwrap_or_else(|| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs_f64() * 1000.0)
+                                .unwrap_or(0.0)
+                        });
+                        if !millis.is_finite() {
+                            return Ok(JsValue::String("Invalid Date".to_string()));
+                        }
+                        Ok(JsValue::String(format!("{:.0}", millis)))
+                    }),
+                );
+                let locale_for_options = locale.clone();
+                formatter.set(
+                    "resolvedOptions",
+                    JsValue::native("resolvedOptions", move |_vm, _args| {
+                        let mut options = JsObject::new();
+                        options.set("locale", JsValue::String(locale_for_options.clone()));
+                        Ok(JsValue::Object(Rc::new(RefCell::new(options))))
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(formatter))))
+            }),
+        );
+        intl.set(
+            "Collator",
+            JsValue::native("Collator", |_vm, _args| {
+                let mut collator = JsObject::new();
+                collator.set(
+                    "compare",
+                    JsValue::native("compare", |_vm, args| {
+                        let a = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                        let b = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+                        let order = match a.cmp(&b) {
+                            std::cmp::Ordering::Less => -1.0,
+                            std::cmp::Ordering::Equal => 0.0,
+                            std::cmp::Ordering::Greater => 1.0,
+                        };
+                        Ok(JsValue::Number(order))
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(collator))))
+            }),
+        );
+        self.globals.insert(
+            "Intl".to_string(),
+            JsValue::Object(Rc::new(RefCell::new(intl))),
+        );
+
+        // RegExp constructor. Rust's regex engine supplies Unicode-aware matching,
+        // case-insensitive, multiline, and dotAll modes. Lookbehind is not yet
+        // supported and is intentionally rejected by the underlying compiler.
+        self.globals.insert(
+            "RegExp".to_string(),
+            JsValue::native("RegExp", |_vm, args| {
+                let pattern = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                let flags = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+                let mut builder = regex::RegexBuilder::new(&pattern);
+                builder
+                    .case_insensitive(flags.contains('i'))
+                    .multi_line(flags.contains('m'))
+                    .dot_matches_new_line(flags.contains('s'));
+                let compiled = builder
+                    .build()
+                    .map_err(|error| format!("SyntaxError: invalid regular expression: {error}"))?;
+                let compiled = Rc::new(compiled);
+
+                let mut regexp = JsObject::new();
+                regexp.set("source", JsValue::String(pattern));
+                regexp.set("flags", JsValue::String(flags.clone()));
+                regexp.set("global", JsValue::Boolean(flags.contains('g')));
+                regexp.set("ignoreCase", JsValue::Boolean(flags.contains('i')));
+                regexp.set("multiline", JsValue::Boolean(flags.contains('m')));
+
+                let test_regex = compiled.clone();
+                regexp.set(
+                    "test",
+                    JsValue::native("test", move |_vm, args| {
+                        let input = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                        Ok(JsValue::Boolean(test_regex.is_match(&input)))
+                    }),
+                );
+
+                let exec_regex = compiled.clone();
+                regexp.set(
+                    "exec",
+                    JsValue::native("exec", move |_vm, args| {
+                        let input = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                        let Some(captures) = exec_regex.captures(&input) else {
+                            return Ok(JsValue::Null);
+                        };
+                        let mut values = Vec::new();
+                        for index in 0..captures.len() {
+                            values.push(
+                                captures
+                                    .get(index)
+                                    .map(|m| JsValue::String(m.as_str().to_string()))
+                                    .unwrap_or(JsValue::Undefined),
+                            );
+                        }
+                        Ok(JsValue::new_array(values))
+                    }),
+                );
+
+                Ok(JsValue::Object(Rc::new(RefCell::new(regexp))))
+            }),
         );
 
         // parseInt & parseFloat
@@ -261,11 +894,111 @@ impl VM {
         self.microtasks.push_back(Rc::new(task));
     }
 
+    fn queue_promise_reaction(&mut self, state: PromiseState, reaction: PromiseReaction) {
+        self.queue_microtask(move |vm| {
+            let PromiseReaction {
+                on_fulfilled,
+                on_rejected,
+                child,
+            } = reaction.clone();
+            let next_state = match state.clone() {
+                PromiseState::Fulfilled(value) => {
+                    if let Some(callback) = on_fulfilled {
+                        match vm.call_function(&callback, &[value]) {
+                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
+                            Ok(value) => PromiseState::Fulfilled(value),
+                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
+                        }
+                    } else {
+                        PromiseState::Fulfilled(value)
+                    }
+                }
+                PromiseState::Rejected(error) => {
+                    if let Some(callback) = on_rejected {
+                        match vm.call_function(&callback, &[error]) {
+                            Ok(JsValue::Promise(inner)) => inner.borrow().state.clone(),
+                            Ok(value) => PromiseState::Fulfilled(value),
+                            Err(error) => PromiseState::Rejected(JsValue::String(error)),
+                        }
+                    } else {
+                        PromiseState::Rejected(error)
+                    }
+                }
+                PromiseState::Pending => PromiseState::Pending,
+            };
+            if !matches!(next_state, PromiseState::Pending) {
+                vm.settle_promise(&child, next_state);
+            }
+            Ok(())
+        });
+    }
+
+    fn settle_promise(&mut self, promise: &Rc<RefCell<JsPromise>>, state: PromiseState) {
+        if !matches!(promise.borrow().state, PromiseState::Pending) {
+            return;
+        }
+        promise.borrow_mut().state = state.clone();
+        let reactions = std::mem::take(&mut promise.borrow_mut().then_callbacks);
+        for reaction in reactions {
+            self.queue_promise_reaction(state.clone(), reaction);
+        }
+    }
+
     pub fn drain_microtasks(&mut self) -> Result<(), String> {
+        let mut processed = 0usize;
         while let Some(task) = self.microtasks.pop_front() {
+            processed += 1;
+            if processed > self.max_microtasks_per_checkpoint {
+                self.microtasks.clear();
+                return Err("Execution terminated: microtask checkpoint exceeded configured limit".to_string());
+            }
             task(self)?;
         }
         Ok(())
+    }
+
+    fn call_function_with_this(
+        &mut self,
+        callee: &JsValue,
+        args: &[JsValue],
+        this_value: JsValue,
+    ) -> Result<JsValue, String> {
+        match callee {
+            JsValue::Function(f) => {
+                if self.frames.len() >= self.max_call_depth {
+                    return Err(format!(
+                        "RangeError: maximum call stack size exceeded (limit {})",
+                        self.max_call_depth
+                    ));
+                }
+                let env = match &f.closure_env {
+                    Some(parent) => Rc::new(RefCell::new(Environment::with_parent(parent.clone()))),
+                    None => Rc::new(RefCell::new(Environment::with_parent(self.current_env.clone()))),
+                };
+                env.borrow_mut().define("this", this_value);
+                for (i, param) in f.params.iter().enumerate() {
+                    env.borrow_mut().define(
+                        param.clone(),
+                        args.get(i).cloned().unwrap_or(JsValue::Undefined),
+                    );
+                }
+
+                let prev_env = self.current_env.clone();
+                self.current_env = env;
+                let target_depth = self.frames.len();
+                let stack_start = self.stack.len();
+                self.frames.push(CallFrame {
+                    chunk_index: f.chunk_index,
+                    ip: 0,
+                    stack_start,
+                    env: prev_env,
+                    is_async: f.is_async,
+                });
+                self.run_until(target_depth)
+            }
+            JsValue::NativeFunction(_, func) => func(self, args),
+            _ => Err(format!("'{}' is not callable", callee.to_js_string())),
+        }
     }
 
     pub fn call_function(
@@ -273,6 +1006,16 @@ impl VM {
         callee: &JsValue,
         args: &[JsValue],
     ) -> Result<JsValue, String> {
+        // Microtasks run at the end of the current JS turn, not after every nested
+        // function/native call. External callbacks (timers/rAF) start with no active
+        // VM frame, so they still flush their microtasks before returning to the host.
+        let should_drain_microtasks = self.frames.is_empty();
+        if matches!(callee, JsValue::Function(_)) && self.frames.len() >= self.max_call_depth {
+            return Err(format!(
+                "RangeError: maximum call stack size exceeded (limit {})",
+                self.max_call_depth
+            ));
+        }
         match callee {
             JsValue::Function(f) => {
                 let env = match &f.closure_env {
@@ -299,15 +1042,20 @@ impl VM {
                     ip: 0,
                     stack_start,
                     env: prev_env,
+                    is_async: f.is_async,
                 });
 
                 let res = self.run_until(target_depth)?;
-                self.drain_microtasks()?;
+                if should_drain_microtasks {
+                    self.drain_microtasks()?;
+                }
                 Ok(res)
             }
             JsValue::NativeFunction(_, func) => {
                 let res = func(self, args)?;
-                self.drain_microtasks()?;
+                if should_drain_microtasks {
+                    self.drain_microtasks()?;
+                }
                 Ok(res)
             }
             _ => Err(format!("'{}' is not callable", callee.to_js_string())),
@@ -327,6 +1075,7 @@ impl VM {
             ip: 0,
             stack_start: 0,
             env: frame_env,
+            is_async: false,
         });
 
         let result = self.run_until(0);
@@ -362,7 +1111,14 @@ impl VM {
                 let finished_frame = self.frames.pop().unwrap();
                 self.current_env = finished_frame.env;
                 self.stack.truncate(finished_frame.stack_start);
-                self.stack.push(JsValue::Undefined);
+                let result = if finished_frame.is_async {
+                    JsValue::Promise(Rc::new(RefCell::new(JsPromise::resolved(
+                        JsValue::Undefined,
+                    ))))
+                } else {
+                    JsValue::Undefined
+                };
+                self.stack.push(result);
                 if self.frames.len() == target_depth {
                     return Ok(self.stack.pop().unwrap_or(JsValue::Undefined));
                 }
@@ -513,6 +1269,13 @@ impl VM {
                     let callee = self.stack.pop().unwrap_or(JsValue::Undefined);
                     match callee {
                         JsValue::Function(f) => {
+                            if self.frames.len() >= self.max_call_depth {
+                                return Err(format!(
+                                    "RangeError: maximum call stack size exceeded (limit {})",
+                                    self.max_call_depth
+                                ));
+                            }
+
                             let env = match &f.closure_env {
                                 Some(parent) => {
                                     Rc::new(RefCell::new(Environment::with_parent(parent.clone())))
@@ -536,6 +1299,7 @@ impl VM {
                                 ip: 0,
                                 stack_start,
                                 env: prev_env,
+                                is_async: f.is_async,
                             });
                         }
                         JsValue::NativeFunction(_, func) => {
@@ -554,11 +1318,117 @@ impl VM {
                         }
                     }
                 }
+                OpCode::Construct(arg_count) => {
+                    let mut args = Vec::new();
+                    for _ in 0..arg_count {
+                        args.push(self.stack.pop().unwrap_or(JsValue::Undefined));
+                    }
+                    args.reverse();
+                    let callee = self.stack.pop().unwrap_or(JsValue::Undefined);
+
+                    match callee {
+                        JsValue::NativeFunction(_, func) => match func(self, &args) {
+                            Ok(value) => self.stack.push(value),
+                            Err(error) => {
+                                self.unwind_exception(JsValue::String(error))?;
+                            }
+                        },
+                        JsValue::Object(class_obj) => {
+                            let is_class = class_obj.borrow().get("_isClass").is_truthy();
+                            if !is_class {
+                                self.unwind_exception(JsValue::String(
+                                    "TypeError: value is not a constructor".to_string(),
+                                ))?;
+                                continue;
+                            }
+
+                            let prototype = match class_obj.borrow().get("prototype") {
+                                JsValue::Object(proto) => Some(proto),
+                                _ => None,
+                            };
+                            let mut instance_object = JsObject::new();
+                            instance_object.proto = prototype;
+                            let instance = JsValue::Object(Rc::new(RefCell::new(instance_object)));
+
+                            let constructor = class_obj.borrow().get("_constructor");
+                            if matches!(constructor, JsValue::Function(_) | JsValue::NativeFunction(_, _)) {
+                                match self.call_function_with_this(
+                                    &constructor,
+                                    &args,
+                                    instance.clone(),
+                                ) {
+                                    Ok(JsValue::Object(returned)) => {
+                                        self.stack.push(JsValue::Object(returned));
+                                    }
+                                    Ok(_) => self.stack.push(instance),
+                                    Err(error) => {
+                                        self.unwind_exception(JsValue::String(error))?;
+                                    }
+                                }
+                            } else {
+                                self.stack.push(instance);
+                            }
+                        }
+                        JsValue::Function(function) => {
+                            let instance = JsValue::new_object();
+                            let callee = JsValue::Function(function);
+                            match self.call_function_with_this(&callee, &args, instance.clone()) {
+                                Ok(JsValue::Object(returned)) => {
+                                    self.stack.push(JsValue::Object(returned));
+                                }
+                                Ok(_) => self.stack.push(instance),
+                                Err(error) => {
+                                    self.unwind_exception(JsValue::String(error))?;
+                                }
+                            }
+                        }
+                        _ => {
+                            self.unwind_exception(JsValue::String(
+                                "TypeError: value is not a constructor".to_string(),
+                            ))?;
+                        }
+                    }
+                }
+                OpCode::Await => {
+                    let awaited = self.stack.pop().unwrap_or(JsValue::Undefined);
+                    match awaited {
+                        JsValue::Promise(promise) => {
+                            let mut state = promise.borrow().state.clone();
+                            if matches!(state, PromiseState::Pending) {
+                                self.drain_microtasks()?;
+                                state = promise.borrow().state.clone();
+                            }
+                            match state {
+                                PromiseState::Fulfilled(value) => self.stack.push(value),
+                                PromiseState::Rejected(error) => {
+                                    self.unwind_exception(error)?;
+                                }
+                                PromiseState::Pending => {
+                                    return Err(
+                                        "Await suspension requires a future host event-loop turn"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        value => self.stack.push(value),
+                    }
+                }
                 OpCode::Return => {
                     let ret = self.stack.pop().unwrap_or(JsValue::Undefined);
                     let finished_frame = self.frames.pop().unwrap();
                     self.current_env = finished_frame.env;
                     self.stack.truncate(finished_frame.stack_start);
+                    let ret = if finished_frame.is_async {
+                        match ret {
+                            JsValue::Promise(promise) => JsValue::Promise(promise),
+                            value => JsValue::Promise(Rc::new(RefCell::new(
+                                JsPromise::resolved(value),
+                            ))),
+                        }
+                    } else {
+                        ret
+                    };
                     self.stack.push(ret);
                     if self.frames.len() == target_depth {
                         return Ok(self.stack.pop().unwrap_or(JsValue::Undefined));
@@ -590,14 +1460,55 @@ impl VM {
                     chunk_index,
                     name,
                     params,
+                    is_async,
                 } => {
                     let func = JsFunction {
                         name,
                         params,
                         chunk_index,
                         closure_env: Some(self.current_env.clone()),
+                        is_async,
                     };
                     self.stack.push(JsValue::Function(Rc::new(func)));
+                }
+                OpCode::MakeClass {
+                    name,
+                    constructor,
+                    methods,
+                } => {
+                    let mut prototype = JsObject::new();
+                    for (method_name, chunk_index, params) in methods {
+                        let method = JsFunction {
+                            name: method_name.clone(),
+                            params,
+                            chunk_index,
+                            closure_env: Some(self.current_env.clone()),
+                            is_async: false,
+                        };
+                        prototype.set(method_name, JsValue::Function(Rc::new(method)));
+                    }
+                    let prototype = Rc::new(RefCell::new(prototype));
+
+                    let mut class = JsObject::new();
+                    class.set("_isClass", JsValue::Boolean(true));
+                    class.set("_className", JsValue::String(name.clone()));
+                    class.set("prototype", JsValue::Object(prototype));
+                    if let Some((chunk_index, params)) = constructor {
+                        class.set(
+                            "_constructor",
+                            JsValue::Function(Rc::new(JsFunction {
+                                name: format!("{name}.constructor"),
+                                params,
+                                chunk_index,
+                                closure_env: Some(self.current_env.clone()),
+                                is_async: false,
+                            })),
+                        );
+                    } else {
+                        class.set("_constructor", JsValue::Undefined);
+                    }
+                    self.stack
+                        .push(JsValue::Object(Rc::new(RefCell::new(class))));
                 }
                 OpCode::GetIndex => {
                     let index_val = self.stack.pop().unwrap_or(JsValue::Undefined);
@@ -609,6 +1520,15 @@ impl VM {
                                 .borrow()
                                 .get(idx)
                                 .cloned()
+                                .unwrap_or(JsValue::Undefined);
+                            self.stack.push(val);
+                        }
+                        JsValue::TypedArray(arr) => {
+                            let idx = index_val.to_number() as usize;
+                            let val = arr
+                                .borrow()
+                                .get(idx)
+                                .map(JsValue::Number)
                                 .unwrap_or(JsValue::Undefined);
                             self.stack.push(val);
                         }
@@ -641,6 +1561,10 @@ impl VM {
                             }
                             borrowed[idx] = val;
                         }
+                        JsValue::TypedArray(arr) => {
+                            let idx = index_val.to_number() as usize;
+                            arr.borrow_mut().set(idx, val.to_number());
+                        }
                         JsValue::Object(obj) => {
                             let key = index_val.to_js_string();
                             obj.borrow_mut().set(key, val);
@@ -651,9 +1575,97 @@ impl VM {
                 OpCode::GetProp(prop) => {
                     let obj_val = self.stack.pop().unwrap_or(JsValue::Undefined);
                     match obj_val {
+                        JsValue::ArrayBuffer(buffer) => {
+                            match prop.as_str() {
+                                "byteLength" => {
+                                    self.stack.push(JsValue::Number(buffer.borrow().len() as f64));
+                                }
+                                "slice" => {
+                                    let source = buffer.clone();
+                                    self.stack.push(JsValue::native("slice", move |_vm, args| {
+                                        let bytes = source.borrow();
+                                        let len = bytes.len() as isize;
+                                        let normalize = |value: Option<&JsValue>, default: isize| {
+                                            let raw = value.map(|v| v.to_number() as isize).unwrap_or(default);
+                                            if raw < 0 { (len + raw).max(0) } else { raw.min(len) }
+                                        };
+                                        let start = normalize(args.get(0), 0) as usize;
+                                        let end = normalize(args.get(1), len).max(start as isize) as usize;
+                                        Ok(JsValue::ArrayBuffer(Rc::new(RefCell::new(
+                                            bytes[start..end.min(bytes.len())].to_vec(),
+                                        ))))
+                                    }));
+                                }
+                                _ => self.stack.push(JsValue::Undefined),
+                            }
+                        }
+                        JsValue::TypedArray(array) => {
+                            match prop.as_str() {
+                                "length" => self.stack.push(JsValue::Number(array.borrow().length as f64)),
+                                "byteLength" => self.stack.push(JsValue::Number(array.borrow().byte_length() as f64)),
+                                "byteOffset" => self.stack.push(JsValue::Number(array.borrow().byte_offset as f64)),
+                                "buffer" => {
+                                    self.stack.push(JsValue::ArrayBuffer(array.borrow().buffer.clone()));
+                                }
+                                "set" => {
+                                    let target = array.clone();
+                                    self.stack.push(JsValue::native("set", move |_vm, args| {
+                                        let offset = args.get(1).map(|v| v.to_number().max(0.0) as usize).unwrap_or(0);
+                                        let values = match args.first() {
+                                            Some(JsValue::TypedArray(src)) => src.borrow().values(),
+                                            Some(JsValue::Array(src)) => src.borrow().clone(),
+                                            _ => Vec::new(),
+                                        };
+                                        let mut target = target.borrow_mut();
+                                        for (i, value) in values.iter().enumerate() {
+                                            if offset + i >= target.length { break; }
+                                            target.set(offset + i, value.to_number());
+                                        }
+                                        Ok(JsValue::Undefined)
+                                    }));
+                                }
+                                "subarray" => {
+                                    let source = array.clone();
+                                    self.stack.push(JsValue::native("subarray", move |_vm, args| {
+                                        let source = source.borrow();
+                                        let len = source.length as isize;
+                                        let normalize = |value: Option<&JsValue>, default: isize| {
+                                            let raw = value.map(|v| v.to_number() as isize).unwrap_or(default);
+                                            if raw < 0 { (len + raw).max(0) } else { raw.min(len) }
+                                        };
+                                        let begin = normalize(args.get(0), 0) as usize;
+                                        let end = normalize(args.get(1), len).max(begin as isize) as usize;
+                                        let bpe = source.kind.bytes_per_element();
+                                        let view = TypedArrayValue::from_buffer(
+                                            source.buffer.clone(),
+                                            source.kind,
+                                            source.byte_offset + begin * bpe,
+                                            Some(end.min(source.length).saturating_sub(begin)),
+                                        )?;
+                                        Ok(JsValue::TypedArray(Rc::new(RefCell::new(view))))
+                                    }));
+                                }
+                                _ => self.stack.push(JsValue::Undefined),
+                            }
+                        }
                         JsValue::Object(obj) => {
                             let val = obj.borrow().get(&prop);
-                            self.stack.push(val);
+                            if let JsValue::Function(function) = val {
+                                let receiver = JsValue::Object(obj.clone());
+                                let function_value = JsValue::Function(function);
+                                self.stack.push(JsValue::native(
+                                    format!("bound:{prop}"),
+                                    move |vm, args| {
+                                        vm.call_function_with_this(
+                                            &function_value,
+                                            args,
+                                            receiver.clone(),
+                                        )
+                                    },
+                                ));
+                            } else {
+                                self.stack.push(val);
+                            }
                         }
                         JsValue::Array(arr) => {
                             match prop.as_str() {
@@ -740,6 +1752,72 @@ impl VM {
                                         Ok(JsValue::Undefined)
                                     }));
                                 }
+                                "filter" => {
+                                    let a_ref = arr.clone();
+                                    self.stack.push(JsValue::native("filter", move |vm, args| {
+                                        let Some(callback) = args.first().cloned() else {
+                                            return Ok(JsValue::new_array(Vec::new()));
+                                        };
+                                        let items = a_ref.borrow().clone();
+                                        let mut result = Vec::new();
+                                        for (i, item) in items.iter().enumerate() {
+                                            let keep = vm.call_function(
+                                                &callback,
+                                                &[item.clone(), JsValue::Number(i as f64)],
+                                            )?;
+                                            if keep.is_truthy() {
+                                                result.push(item.clone());
+                                            }
+                                        }
+                                        Ok(JsValue::new_array(result))
+                                    }));
+                                }
+                                "reduce" => {
+                                    let a_ref = arr.clone();
+                                    self.stack.push(JsValue::native("reduce", move |vm, args| {
+                                        let Some(callback) = args.first().cloned() else {
+                                            return Ok(JsValue::Undefined);
+                                        };
+                                        let items = a_ref.borrow().clone();
+                                        if items.is_empty() && args.get(1).is_none() {
+                                            return Err("TypeError: reduce of empty array with no initial value".to_string());
+                                        }
+                                        let mut index = 0usize;
+                                        let mut accumulator = if let Some(initial) = args.get(1) {
+                                            initial.clone()
+                                        } else {
+                                            index = 1;
+                                            items.first().cloned().unwrap_or(JsValue::Undefined)
+                                        };
+                                        while index < items.len() {
+                                            accumulator = vm.call_function(
+                                                &callback,
+                                                &[
+                                                    accumulator,
+                                                    items[index].clone(),
+                                                    JsValue::Number(index as f64),
+                                                ],
+                                            )?;
+                                            index += 1;
+                                        }
+                                        Ok(accumulator)
+                                    }));
+                                }
+                                "slice" => {
+                                    let a_ref = arr.clone();
+                                    self.stack.push(JsValue::native("slice", move |_vm, args| {
+                                        let items = a_ref.borrow();
+                                        let len = items.len() as isize;
+                                        let normalize = |value: Option<&JsValue>, default: isize| {
+                                            let raw = value.map(|v| v.to_number() as isize).unwrap_or(default);
+                                            if raw < 0 { (len + raw).max(0) } else { raw.min(len) }
+                                        };
+                                        let start = normalize(args.get(0), 0) as usize;
+                                        let end = normalize(args.get(1), len) as usize;
+                                        let end = end.max(start).min(items.len());
+                                        Ok(JsValue::new_array(items[start..end].to_vec()))
+                                    }));
+                                }
                                 _ => self.stack.push(JsValue::Undefined),
                             }
                         }
@@ -797,81 +1875,95 @@ impl VM {
                                         Ok(JsValue::Boolean(str_val.contains(&needle)))
                                     }));
                                 }
+                                "startsWith" => {
+                                    let str_val = s.clone();
+                                    self.stack.push(JsValue::native("startsWith", move |_vm, args| {
+                                        let needle = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                                        Ok(JsValue::Boolean(str_val.starts_with(&needle)))
+                                    }));
+                                }
+                                "endsWith" => {
+                                    let str_val = s.clone();
+                                    self.stack.push(JsValue::native("endsWith", move |_vm, args| {
+                                        let needle = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                                        Ok(JsValue::Boolean(str_val.ends_with(&needle)))
+                                    }));
+                                }
+                                "replace" => {
+                                    let str_val = s.clone();
+                                    self.stack.push(JsValue::native("replace", move |_vm, args| {
+                                        let from = args.get(0).map(|v| v.to_js_string()).unwrap_or_default();
+                                        let to = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+                                        Ok(JsValue::String(str_val.replacen(&from, &to, 1)))
+                                    }));
+                                }
                                 _ => self.stack.push(JsValue::Undefined),
                             }
                         }
                         JsValue::Promise(promise) => {
                             match prop.as_str() {
                                 "then" => {
-                                    let p = promise.clone();
+                                    let source = promise.clone();
                                     self.stack.push(JsValue::native("then", move |vm, args| {
-                                        let on_fulfilled = args.first().cloned();
-                                        let on_rejected = args.get(1).cloned();
-                                        let state = p.borrow().state.clone();
-                                        match state {
-                                            PromiseState::Fulfilled(val) => {
-                                                if let Some(cb) = on_fulfilled {
-                                                    let next_val = vm.call_function(&cb, &[val])?;
-                                                    let unwrapped = if let JsValue::Promise(inner_p) = next_val {
-                                                        match &inner_p.borrow().state {
-                                                            PromiseState::Fulfilled(v) => v.clone(),
-                                                            PromiseState::Rejected(err) => return Err(err.to_js_string()),
-                                                            PromiseState::Pending => JsValue::Undefined,
-                                                        }
-                                                    } else {
-                                                        next_val
-                                                    };
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::resolved(unwrapped),
-                                                    ))))
-                                                } else {
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::resolved(val),
-                                                    ))))
-                                                }
-                                            }
-                                            PromiseState::Rejected(err) => {
-                                                if let Some(cb) = on_rejected {
-                                                    let handled = vm.call_function(&cb, &[err])?;
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::resolved(handled),
-                                                    ))))
-                                                } else {
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::rejected(err),
-                                                    ))))
-                                                }
-                                            }
-                                            PromiseState::Pending => {
-                                                let new_p = Rc::new(RefCell::new(JsPromise::pending()));
-                                                if let Some(cb) = on_fulfilled {
-                                                    p.borrow_mut().then_callbacks.push((cb, on_rejected));
-                                                }
-                                                Ok(JsValue::Promise(new_p))
-                                            }
+                                        let child = Rc::new(RefCell::new(JsPromise::pending()));
+                                        let reaction = PromiseReaction {
+                                            on_fulfilled: args.first().cloned(),
+                                            on_rejected: args.get(1).cloned(),
+                                            child: child.clone(),
+                                        };
+                                        let state = source.borrow().state.clone();
+                                        if matches!(state, PromiseState::Pending) {
+                                            source.borrow_mut().then_callbacks.push(reaction);
+                                        } else {
+                                            vm.queue_promise_reaction(state, reaction);
                                         }
+                                        Ok(JsValue::Promise(child))
                                     }));
                                 }
                                 "catch" => {
-                                    let p = promise.clone();
+                                    let source = promise.clone();
                                     self.stack.push(JsValue::native("catch", move |vm, args| {
-                                        let on_rejected = args.first().cloned();
-                                        let state = p.borrow().state.clone();
-                                        match state {
-                                            PromiseState::Rejected(err) => {
-                                                if let Some(cb) = on_rejected {
-                                                    let handled = vm.call_function(&cb, &[err])?;
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::resolved(handled),
-                                                    ))))
-                                                } else {
-                                                    Ok(JsValue::Promise(Rc::new(RefCell::new(
-                                                        JsPromise::rejected(err),
-                                                    ))))
-                                                }
-                                            }
-                                            _ => Ok(JsValue::Promise(p.clone())),
+                                        let child = Rc::new(RefCell::new(JsPromise::pending()));
+                                        let reaction = PromiseReaction {
+                                            on_fulfilled: None,
+                                            on_rejected: args.first().cloned(),
+                                            child: child.clone(),
+                                        };
+                                        let state = source.borrow().state.clone();
+                                        if matches!(state, PromiseState::Pending) {
+                                            source.borrow_mut().then_callbacks.push(reaction);
+                                        } else {
+                                            vm.queue_promise_reaction(state, reaction);
                                         }
+                                        Ok(JsValue::Promise(child))
+                                    }));
+                                }
+                                "finally" => {
+                                    let source = promise.clone();
+                                    self.stack.push(JsValue::native("finally", move |vm, args| {
+                                        let callback = args.first().cloned();
+                                        let child = Rc::new(RefCell::new(JsPromise::pending()));
+                                        let child_for_task = child.clone();
+                                        let state = source.borrow().state.clone();
+                                        if matches!(state, PromiseState::Pending) {
+                                            // Minimal pending behavior: preserve propagation when the
+                                            // source settles; full finally callback fan-out is handled
+                                            // for already-settled promises below.
+                                            source.borrow_mut().then_callbacks.push(PromiseReaction {
+                                                on_fulfilled: None,
+                                                on_rejected: None,
+                                                child: child.clone(),
+                                            });
+                                        } else {
+                                            vm.queue_microtask(move |vm| {
+                                                if let Some(callback) = callback.as_ref() {
+                                                    let _ = vm.call_function(callback, &[]);
+                                                }
+                                                vm.settle_promise(&child_for_task, state.clone());
+                                                Ok(())
+                                            });
+                                        }
+                                        Ok(JsValue::Promise(child))
                                     }));
                                 }
                                 _ => self.stack.push(JsValue::Undefined),

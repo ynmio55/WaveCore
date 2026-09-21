@@ -8,3 +8,6 @@ wavecore-pixels = { path = "../wavecore-pixels" }
 wavecore-render = { path = "../wavecore-render" }
 wavecore-layout = { path = "../wavecore-layout" }
 minifb = "0.28"
+wgpu = "0.20.1"
+pollster = "0.3"
+bytemuck = { version = "1.16", features = ["derive"] }

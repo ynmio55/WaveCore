@@ -5,6 +5,135 @@ use std::rc::Rc;
 
 pub type NativeFn = Rc<dyn Fn(&mut crate::vm::VM, &[JsValue]) -> Result<JsValue, String>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypedArrayKind {
+    Float32,
+    Uint8,
+    Uint16,
+    Uint32,
+}
+
+impl TypedArrayKind {
+    pub fn bytes_per_element(self) -> usize {
+        match self {
+            Self::Float32 | Self::Uint32 => 4,
+            Self::Uint16 => 2,
+            Self::Uint8 => 1,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Float32 => "Float32Array",
+            Self::Uint8 => "Uint8Array",
+            Self::Uint16 => "Uint16Array",
+            Self::Uint32 => "Uint32Array",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct TypedArrayValue {
+    pub buffer: Rc<RefCell<Vec<u8>>>,
+    pub kind: TypedArrayKind,
+    pub byte_offset: usize,
+    pub length: usize,
+}
+
+impl TypedArrayValue {
+    pub fn new(kind: TypedArrayKind, length: usize) -> Self {
+        let bytes = length.saturating_mul(kind.bytes_per_element());
+        Self {
+            buffer: Rc::new(RefCell::new(vec![0; bytes])),
+            kind,
+            byte_offset: 0,
+            length,
+        }
+    }
+
+    pub fn from_buffer(
+        buffer: Rc<RefCell<Vec<u8>>>,
+        kind: TypedArrayKind,
+        byte_offset: usize,
+        length: Option<usize>,
+    ) -> Result<Self, String> {
+        let bpe = kind.bytes_per_element();
+        if byte_offset % bpe != 0 {
+            return Err("RangeError: typed array byteOffset must align to element size".to_string());
+        }
+        let buffer_len = buffer.borrow().len();
+        if byte_offset > buffer_len {
+            return Err("RangeError: typed array byteOffset exceeds ArrayBuffer".to_string());
+        }
+        let available = (buffer_len - byte_offset) / bpe;
+        let length = length.unwrap_or(available);
+        if length > available {
+            return Err("RangeError: typed array length exceeds ArrayBuffer".to_string());
+        }
+        Ok(Self { buffer, kind, byte_offset, length })
+    }
+
+    pub fn byte_length(&self) -> usize {
+        self.length.saturating_mul(self.kind.bytes_per_element())
+    }
+
+    pub fn get(&self, index: usize) -> Option<f64> {
+        if index >= self.length {
+            return None;
+        }
+        let start = self.byte_offset + index * self.kind.bytes_per_element();
+        let bytes = self.buffer.borrow();
+        Some(match self.kind {
+            TypedArrayKind::Uint8 => bytes[start] as f64,
+            TypedArrayKind::Uint16 => {
+                u16::from_le_bytes([bytes[start], bytes[start + 1]]) as f64
+            }
+            TypedArrayKind::Uint32 => u32::from_le_bytes([
+                bytes[start],
+                bytes[start + 1],
+                bytes[start + 2],
+                bytes[start + 3],
+            ]) as f64,
+            TypedArrayKind::Float32 => f32::from_le_bytes([
+                bytes[start],
+                bytes[start + 1],
+                bytes[start + 2],
+                bytes[start + 3],
+            ]) as f64,
+        })
+    }
+
+    pub fn set(&mut self, index: usize, value: f64) {
+        if index >= self.length {
+            return;
+        }
+        let start = self.byte_offset + index * self.kind.bytes_per_element();
+        let mut bytes = self.buffer.borrow_mut();
+        match self.kind {
+            TypedArrayKind::Uint8 => {
+                bytes[start] = (value as i128).rem_euclid(1i128 << 8) as u8;
+            }
+            TypedArrayKind::Uint16 => {
+                let raw = (value as i128).rem_euclid(1i128 << 16) as u16;
+                bytes[start..start + 2].copy_from_slice(&raw.to_le_bytes());
+            }
+            TypedArrayKind::Uint32 => {
+                let raw = (value as i128).rem_euclid(1i128 << 32) as u32;
+                bytes[start..start + 4].copy_from_slice(&raw.to_le_bytes());
+            }
+            TypedArrayKind::Float32 => {
+                bytes[start..start + 4].copy_from_slice(&(value as f32).to_le_bytes());
+            }
+        }
+    }
+
+    pub fn values(&self) -> Vec<JsValue> {
+        (0..self.length)
+            .map(|i| JsValue::Number(self.get(i).unwrap_or(0.0)))
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PromiseState {
     Pending,
@@ -13,9 +142,16 @@ pub enum PromiseState {
 }
 
 #[derive(Clone)]
+pub struct PromiseReaction {
+    pub on_fulfilled: Option<JsValue>,
+    pub on_rejected: Option<JsValue>,
+    pub child: Rc<RefCell<JsPromise>>,
+}
+
+#[derive(Clone)]
 pub struct JsPromise {
     pub state: PromiseState,
-    pub then_callbacks: Vec<(JsValue, Option<JsValue>)>, // (on_fulfilled, on_rejected)
+    pub then_callbacks: Vec<PromiseReaction>,
 }
 
 impl JsPromise {
@@ -123,6 +259,7 @@ pub struct JsFunction {
     pub params: Vec<String>,
     pub chunk_index: usize,
     pub closure_env: Option<Rc<RefCell<Environment>>>,
+    pub is_async: bool,
 }
 
 #[derive(Clone)]
@@ -133,6 +270,8 @@ pub enum JsValue {
     Number(f64),
     String(String),
     Array(Rc<RefCell<Vec<JsValue>>>),
+    ArrayBuffer(Rc<RefCell<Vec<u8>>>),
+    TypedArray(Rc<RefCell<TypedArrayValue>>),
     Object(Rc<RefCell<JsObject>>),
     Function(Rc<JsFunction>),
     NativeFunction(String, NativeFn),
@@ -162,6 +301,8 @@ impl JsValue {
             JsValue::Number(n) => *n != 0.0 && !n.is_nan(),
             JsValue::String(s) => !s.is_empty(),
             JsValue::Array(_)
+            | JsValue::ArrayBuffer(_)
+            | JsValue::TypedArray(_)
             | JsValue::Object(_)
             | JsValue::Function(_)
             | JsValue::NativeFunction(_, _)
@@ -177,7 +318,7 @@ impl JsValue {
             JsValue::Number(_) => "number",
             JsValue::String(_) => "string",
             JsValue::Function(_) | JsValue::NativeFunction(_, _) => "function",
-            JsValue::Array(_) | JsValue::Object(_) | JsValue::Promise(_) => "object",
+            JsValue::Array(_) | JsValue::ArrayBuffer(_) | JsValue::TypedArray(_) | JsValue::Object(_) | JsValue::Promise(_) => "object",
         }
     }
 
@@ -198,6 +339,14 @@ impl JsValue {
                 let items: Vec<String> = arr.borrow().iter().map(|v| v.to_js_string()).collect();
                 items.join(",")
             }
+            JsValue::ArrayBuffer(_) => "[object ArrayBuffer]".to_string(),
+            JsValue::TypedArray(array) => array
+                .borrow()
+                .values()
+                .iter()
+                .map(|v| v.to_js_string())
+                .collect::<Vec<_>>()
+                .join(","),
             JsValue::Object(obj) => {
                 if let Some(t) = obj.borrow().properties.get("toString") {
                     if let JsValue::String(s) = t {
@@ -235,7 +384,9 @@ impl JsValue {
                     f64::NAN
                 }
             }
-            JsValue::Object(_)
+            JsValue::ArrayBuffer(_)
+            | JsValue::TypedArray(_)
+            | JsValue::Object(_)
             | JsValue::Function(_)
             | JsValue::NativeFunction(_, _)
             | JsValue::Promise(_) => f64::NAN,
@@ -253,6 +404,8 @@ impl PartialEq for JsValue {
             (JsValue::Number(a), JsValue::Number(b)) => a == b,
             (JsValue::String(a), JsValue::String(b)) => a == b,
             (JsValue::Array(a), JsValue::Array(b)) => Rc::ptr_eq(a, b),
+            (JsValue::ArrayBuffer(a), JsValue::ArrayBuffer(b)) => Rc::ptr_eq(a, b),
+            (JsValue::TypedArray(a), JsValue::TypedArray(b)) => Rc::ptr_eq(a, b),
             (JsValue::Object(a), JsValue::Object(b)) => Rc::ptr_eq(a, b),
             (JsValue::Promise(a), JsValue::Promise(b)) => Rc::ptr_eq(a, b),
             (JsValue::Number(a), JsValue::String(b)) => {

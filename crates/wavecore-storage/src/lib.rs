@@ -28,9 +28,8 @@ impl Cookie {
             .to_string();
         let default_path = parsed_url
             .as_ref()
-            .map(|u| u.path())
-            .unwrap_or("/")
-            .to_string();
+            .map(|u| default_cookie_path(u.path()))
+            .unwrap_or_else(|| "/".to_string());
 
         let mut domain = default_domain;
         let mut path = default_path;
@@ -66,7 +65,14 @@ impl Cookie {
 
     pub fn matches_url(&self, target_url: &Url) -> bool {
         if let Some(host) = target_url.host_str() {
-            if !host.ends_with(&self.domain) && host != self.domain {
+            let host = host.to_ascii_lowercase();
+            let domain = self.domain.to_ascii_lowercase();
+            let domain_matches = host == domain
+                || host
+                    .strip_suffix(&domain)
+                    .map(|prefix| prefix.ends_with('.'))
+                    .unwrap_or(false);
+            if !domain_matches {
                 return false;
             }
         } else {
@@ -82,6 +88,20 @@ impl Cookie {
         }
 
         true
+    }
+}
+
+fn default_cookie_path(path: &str) -> String {
+    if !path.starts_with('/') || path == "/" {
+        return "/".to_string();
+    }
+    let Some(last_slash) = path.rfind('/') else {
+        return "/".to_string();
+    };
+    if last_slash == 0 {
+        "/".to_string()
+    } else {
+        path[..last_slash].to_string()
     }
 }
 
@@ -172,40 +192,31 @@ impl WebStorage {
     }
 
     fn save(&self) {
-        if let Some(path) = &self.storage_file {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
+        let Some(path) = &self.storage_file else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return;
             }
-            let json = self.to_json();
-            let _ = fs::write(path, json);
+        }
+        let Ok(json) = serde_json::to_string_pretty(&self.data) else {
+            return;
+        };
+
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, json).is_err() {
+            return;
+        }
+        if fs::rename(&tmp, path).is_err() {
+            let _ = fs::remove_file(path);
+            let _ = fs::rename(&tmp, path);
         }
     }
 
-    fn to_json(&self) -> String {
-        let pairs: Vec<String> = self
-            .data
-            .iter()
-            .map(|(k, v)| {
-                format!(
-                    "\"{}\": \"{}\"",
-                    k.replace('"', "\\\""),
-                    v.replace('"', "\\\"")
-                )
-            })
-            .collect();
-        format!("{{\n  {}\n}}", pairs.join(",\n  "))
-    }
-
     fn load_json(&mut self, json_str: &str) {
-        for line in json_str.lines() {
-            let trimmed = line.trim().trim_end_matches(',');
-            if let Some((k, v)) = trimmed.split_once(':') {
-                let key = k.trim().trim_matches('"').to_string();
-                let val = v.trim().trim_matches('"').to_string();
-                if !key.is_empty() {
-                    self.data.insert(key, val);
-                }
-            }
+        if let Ok(data) = serde_json::from_str::<HashMap<String, String>>(json_str) {
+            self.data = data;
         }
     }
 }
@@ -326,4 +337,32 @@ mod tests {
         storage.clear();
         assert_eq!(storage.length(), 0);
     }
+    #[test]
+    fn cookie_domain_boundary_and_default_path_are_safe() {
+        let cookie = Cookie::parse(
+            "session=1; Domain=example.com",
+            "https://example.com/account/login",
+        )
+        .unwrap();
+        assert_eq!(cookie.path, "/account");
+        assert!(cookie.matches_url(&Url::parse("https://sub.example.com/account/home").unwrap()));
+        assert!(!cookie.matches_url(&Url::parse("https://notexample.com/account/home").unwrap()));
+    }
+
+    #[test]
+    fn persistent_storage_round_trips_special_characters() {
+        let dir = std::env::temp_dir().join(format!("wavecore-storage-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        {
+            let mut storage = WebStorage::new_persistent(&dir, "https://example.com");
+            storage.set_item("quoted:key", "line1\n\"quoted\"\\path");
+        }
+        let storage = WebStorage::new_persistent(&dir, "https://example.com");
+        assert_eq!(
+            storage.get_item("quoted:key"),
+            Some("line1\n\"quoted\"\\path")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
 }

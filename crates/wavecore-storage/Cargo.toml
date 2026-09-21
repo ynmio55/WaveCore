@@ -7,3 +7,4 @@ description = "Cookies, LocalStorage, SessionStorage, and HTTP Cache for WaveCor
 
 [dependencies]
 url = "2.5"
+serde_json = "1"

@@ -85,7 +85,16 @@ pub enum Expr {
         name: Option<String>,
         params: Vec<String>,
         body: Vec<Stmt>,
+        is_async: bool,
     },
+    Await(Box<Expr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassMethod {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +124,11 @@ pub enum Stmt {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        is_async: bool,
+    },
+    ClassDecl {
+        name: String,
+        methods: Vec<ClassMethod>,
     },
     Return(Option<Expr>),
     TryCatch {
