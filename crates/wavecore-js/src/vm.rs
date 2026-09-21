@@ -680,6 +680,125 @@ impl VM {
             }),
         );
 
+        // Intl compatibility surface for common framework/runtime formatting paths.
+        // This is intentionally deterministic and locale-light; ICU-grade locale data
+        // can replace the formatter internals later without changing the JS API shape.
+        let mut intl = JsObject::new();
+        intl.set(
+            "NumberFormat",
+            JsValue::native("NumberFormat", |_vm, args| {
+                let locale = args
+                    .first()
+                    .map(|v| v.to_js_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "en-US".to_string());
+                let mut formatter = JsObject::new();
+                let locale_for_format = locale.clone();
+                formatter.set(
+                    "format",
+                    JsValue::native("format", move |_vm, args| {
+                        let value = args.first().map(|v| v.to_number()).unwrap_or(f64::NAN);
+                        if !value.is_finite() {
+                            return Ok(JsValue::String(value.to_string()));
+                        }
+                        let mut text = if value.fract() == 0.0 {
+                            format!("{:.0}", value)
+                        } else {
+                            let mut s = format!("{value:.3}");
+                            while s.ends_with('0') { s.pop(); }
+                            if s.ends_with('.') { s.pop(); }
+                            s
+                        };
+                        let decimal = if locale_for_format.starts_with("de")
+                            || locale_for_format.starts_with("fr")
+                        {
+                            ','
+                        } else {
+                            '.'
+                        };
+                        if decimal != '.' {
+                            text = text.replace('.', &decimal.to_string());
+                        }
+                        Ok(JsValue::String(text))
+                    }),
+                );
+                let locale_for_options = locale.clone();
+                formatter.set(
+                    "resolvedOptions",
+                    JsValue::native("resolvedOptions", move |_vm, _args| {
+                        let mut options = JsObject::new();
+                        options.set("locale", JsValue::String(locale_for_options.clone()));
+                        options.set("style", JsValue::String("decimal".to_string()));
+                        Ok(JsValue::Object(Rc::new(RefCell::new(options))))
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(formatter))))
+            }),
+        );
+        intl.set(
+            "DateTimeFormat",
+            JsValue::native("DateTimeFormat", |_vm, args| {
+                let locale = args
+                    .first()
+                    .map(|v| v.to_js_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "en-US".to_string());
+                let mut formatter = JsObject::new();
+                formatter.set(
+                    "format",
+                    JsValue::native("format", move |_vm, args| {
+                        let millis = args.first().map(|v| match v {
+                            JsValue::Object(obj) => obj.borrow().get("_timeValue").to_number(),
+                            other => other.to_number(),
+                        }).unwrap_or_else(|| {
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs_f64() * 1000.0)
+                                .unwrap_or(0.0)
+                        });
+                        if !millis.is_finite() {
+                            return Ok(JsValue::String("Invalid Date".to_string()));
+                        }
+                        Ok(JsValue::String(format!("{:.0}", millis)))
+                    }),
+                );
+                let locale_for_options = locale.clone();
+                formatter.set(
+                    "resolvedOptions",
+                    JsValue::native("resolvedOptions", move |_vm, _args| {
+                        let mut options = JsObject::new();
+                        options.set("locale", JsValue::String(locale_for_options.clone()));
+                        Ok(JsValue::Object(Rc::new(RefCell::new(options))))
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(formatter))))
+            }),
+        );
+        intl.set(
+            "Collator",
+            JsValue::native("Collator", |_vm, _args| {
+                let mut collator = JsObject::new();
+                collator.set(
+                    "compare",
+                    JsValue::native("compare", |_vm, args| {
+                        let a = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                        let b = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+                        let order = match a.cmp(&b) {
+                            std::cmp::Ordering::Less => -1.0,
+                            std::cmp::Ordering::Equal => 0.0,
+                            std::cmp::Ordering::Greater => 1.0,
+                        };
+                        Ok(JsValue::Number(order))
+                    }),
+                );
+                Ok(JsValue::Object(Rc::new(RefCell::new(collator))))
+            }),
+        );
+        self.globals.insert(
+            "Intl".to_string(),
+            JsValue::Object(Rc::new(RefCell::new(intl))),
+        );
+
         // RegExp constructor. Rust's regex engine supplies Unicode-aware matching,
         // case-insensitive, multiline, and dotAll modes. Lookbehind is not yet
         // supported and is intentionally rejected by the underlying compiler.
