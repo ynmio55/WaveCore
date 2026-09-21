@@ -65,7 +65,12 @@ fn compat_fetch_response_shape_and_status() {
     )
     .unwrap();
 
-    assert_eq!(result, JsValue::Number(201.0));
+    // Promise reactions run as microtasks after the script turn.
+    assert_eq!(result, JsValue::Number(0.0));
+    assert_eq!(
+        eval_script("status + (ok ? 1 : 0);", &mut vm).unwrap(),
+        JsValue::Number(201.0)
+    );
 }
 
 #[test]
