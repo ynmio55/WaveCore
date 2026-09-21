@@ -259,6 +259,7 @@ pub struct JsFunction {
     pub params: Vec<String>,
     pub chunk_index: usize,
     pub closure_env: Option<Rc<RefCell<Environment>>>,
+    pub is_async: bool,
 }
 
 #[derive(Clone)]
