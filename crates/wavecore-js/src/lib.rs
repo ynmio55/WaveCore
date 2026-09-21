@@ -685,4 +685,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn async_function_and_await_resolved_promise_work() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                async function addLater(a, b) {
+                    let value = await Promise.resolve(a + b);
+                    return value * 2;
+                }
+                let observed = 0;
+                addLater(4, 5).then(function(value) {
+                    observed = value;
+                });
+                observed;
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(result, JsValue::Number(0.0));
+        assert_eq!(
+            eval_script("observed;", &mut vm).unwrap(),
+            JsValue::Number(18.0)
+        );
+    }
+
+    #[test]
+    fn intl_number_date_and_collator_surface_work() {
+        let mut vm = VM::new();
+        let result = eval_script(
+            r#"
+                let nf = new Intl.NumberFormat("en-US");
+                let df = new Intl.DateTimeFormat("th-TH");
+                let collator = new Intl.Collator("en-US");
+                let number = nf.format(1234.5);
+                let date = df.format(new Date(5000));
+                (number == "1234.5" ? 1 : 0)
+                    + (date == "5000" ? 2 : 0)
+                    + (collator.compare("a", "b") < 0 ? 4 : 0);
+            "#,
+            &mut vm,
+        )
+        .unwrap();
+
+        assert_eq!(result, JsValue::Number(7.0));
+    }
+
 }
