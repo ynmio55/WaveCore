@@ -571,7 +571,7 @@ mod tests {
             r#"
                 let headers = new Headers({ "x-wave": "core" });
                 headers.append("x-wave", "engine");
-                let request = new Request("data:application/json,{"ok":true}", {
+                let request = new Request("data:application/json,{\\\"ok\\\":true}", {
                     method: "GET",
                     headers: headers
                 });
