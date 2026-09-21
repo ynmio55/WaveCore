@@ -226,7 +226,10 @@ impl NetworkClient {
         caller_origin: Option<&Origin>,
     ) -> Result<HttpResponse, NetError> {
         let method = method.trim().to_ascii_uppercase();
-        if method == "GET" && headers.is_empty() && body.is_none() {
+        if method == "GET"
+            && body.is_none()
+            && (headers.is_empty() || url.trim().starts_with("data:"))
+        {
             return self.fetch_with_origin(url, caller_origin);
         }
         if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS") {
