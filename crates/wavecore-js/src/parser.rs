@@ -25,8 +25,11 @@ impl Parser {
             || self.match_token(&TokenKind::Var)
         {
             self.var_declaration()
+        } else if self.match_token(&TokenKind::Async) {
+            self.consume(&TokenKind::Function, "Expected 'function' after 'async'")?;
+            self.function_declaration(true)
         } else if self.match_token(&TokenKind::Function) {
-            self.function_declaration()
+            self.function_declaration(false)
         } else if self.match_token(&TokenKind::Class) {
             self.class_declaration()
         } else {
@@ -101,7 +104,7 @@ impl Parser {
         Ok(Stmt::VarDecl { name, initializer })
     }
 
-    fn function_declaration(&mut self) -> Result<Stmt, String> {
+    fn function_declaration(&mut self, is_async: bool) -> Result<Stmt, String> {
         let name = match self.advance().kind {
             TokenKind::Identifier(n) => n,
             _ => return Err(format!("Expected function name at line {}", self.previous().line)),
@@ -129,7 +132,12 @@ impl Parser {
 
         self.consume(&TokenKind::LeftBrace, "Expected '{' before function body")?;
         let body = self.block_statement()?;
-        Ok(Stmt::FunctionDecl { name, params, body })
+        Ok(Stmt::FunctionDecl {
+            name,
+            params,
+            body,
+            is_async,
+        })
     }
 
     fn statement(&mut self) -> Result<Stmt, String> {
@@ -535,6 +543,8 @@ impl Parser {
                 op: UnaryOp::TypeOf,
                 expr,
             })
+        } else if self.match_token(&TokenKind::Await) {
+            Ok(Expr::Await(Box::new(self.unary()?)))
         } else if self.match_token(&TokenKind::New) {
             let callee = self.call()?;
             match callee {
@@ -656,8 +666,13 @@ impl Parser {
             return Ok(Expr::Object(entries));
         }
 
-        // Function expression: function [name](params) { body }
-        if self.match_token(&TokenKind::Function) {
+        // Function expression: [async] function [name](params) { body }
+        let mut is_async_function = false;
+        if self.match_token(&TokenKind::Async) {
+            self.consume(&TokenKind::Function, "Expected 'function' after 'async'")?;
+            is_async_function = true;
+        }
+        if is_async_function || self.match_token(&TokenKind::Function) {
             let name = if let TokenKind::Identifier(n) = &self.peek().kind {
                 let n = n.clone();
                 self.advance();
@@ -686,7 +701,12 @@ impl Parser {
             self.consume(&TokenKind::RightParen, "Expected ')' after parameters")?;
             self.consume(&TokenKind::LeftBrace, "Expected '{' before function body")?;
             let body = self.block_statement()?;
-            return Ok(Expr::FunctionExpr { name, params, body });
+            return Ok(Expr::FunctionExpr {
+                name,
+                params,
+                body,
+                is_async: is_async_function,
+            });
         }
 
         let token = self.advance();
