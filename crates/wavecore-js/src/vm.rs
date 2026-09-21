@@ -13,6 +13,7 @@ pub struct CallFrame {
     pub ip: usize,
     pub stack_start: usize,
     pub env: Rc<RefCell<Environment>>,
+    pub is_async: bool,
 }
 
 #[derive(Clone)]
@@ -991,16 +992,9 @@ impl VM {
                     ip: 0,
                     stack_start,
                     env: prev_env,
+                    is_async: f.is_async,
                 });
-                let result = self.run_until(target_depth);
-                if f.is_async {
-                    Ok(JsValue::Promise(Rc::new(RefCell::new(match result {
-                        Ok(value) => JsPromise::resolved(value),
-                        Err(error) => JsPromise::rejected(JsValue::String(error)),
-                    }))))
-                } else {
-                    result
-                }
+                self.run_until(target_depth)
             }
             JsValue::NativeFunction(_, func) => func(self, args),
             _ => Err(format!("'{}' is not callable", callee.to_js_string())),
@@ -1048,17 +1042,10 @@ impl VM {
                     ip: 0,
                     stack_start,
                     env: prev_env,
+                    is_async: f.is_async,
                 });
 
-                let execution = self.run_until(target_depth);
-                let res = if f.is_async {
-                    JsValue::Promise(Rc::new(RefCell::new(match execution {
-                        Ok(value) => JsPromise::resolved(value),
-                        Err(error) => JsPromise::rejected(JsValue::String(error)),
-                    })))
-                } else {
-                    execution?
-                };
+                let res = self.run_until(target_depth)?;
                 if should_drain_microtasks {
                     self.drain_microtasks()?;
                 }
@@ -1088,6 +1075,7 @@ impl VM {
             ip: 0,
             stack_start: 0,
             env: frame_env,
+            is_async: false,
         });
 
         let result = self.run_until(0);
@@ -1123,7 +1111,14 @@ impl VM {
                 let finished_frame = self.frames.pop().unwrap();
                 self.current_env = finished_frame.env;
                 self.stack.truncate(finished_frame.stack_start);
-                self.stack.push(JsValue::Undefined);
+                let result = if finished_frame.is_async {
+                    JsValue::Promise(Rc::new(RefCell::new(JsPromise::resolved(
+                        JsValue::Undefined,
+                    ))))
+                } else {
+                    JsValue::Undefined
+                };
+                self.stack.push(result);
                 if self.frames.len() == target_depth {
                     return Ok(self.stack.pop().unwrap_or(JsValue::Undefined));
                 }
@@ -1304,6 +1299,7 @@ impl VM {
                                 ip: 0,
                                 stack_start,
                                 env: prev_env,
+                                is_async: f.is_async,
                             });
                         }
                         JsValue::NativeFunction(_, func) => {
@@ -1423,6 +1419,16 @@ impl VM {
                     let finished_frame = self.frames.pop().unwrap();
                     self.current_env = finished_frame.env;
                     self.stack.truncate(finished_frame.stack_start);
+                    let ret = if finished_frame.is_async {
+                        match ret {
+                            JsValue::Promise(promise) => JsValue::Promise(promise),
+                            value => JsValue::Promise(Rc::new(RefCell::new(
+                                JsPromise::resolved(value),
+                            ))),
+                        }
+                    } else {
+                        ret
+                    };
                     self.stack.push(ret);
                     if self.frames.len() == target_depth {
                         return Ok(self.stack.pop().unwrap_or(JsValue::Undefined));
